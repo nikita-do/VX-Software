@@ -86,3 +86,5 @@ fp-info-cache
 *.xml
 *.csv
 
+### PyQt cache
+*cache*/
