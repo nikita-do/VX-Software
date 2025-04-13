@@ -1,235 +1,485 @@
-#--------------------------------------------------------------------------------------------------
-#   Description: Main Window
-#   Run bellow commdand for UI Auto generating
-#       ./ui_gen.bat
-#--------------------------------------------------------------------------------------------------
+''' Software v0.2.0:
+    Feature:
+    - Auto restart device and reset timestamp after 5 minutes of activity
+    - Publish captured waveforms every 5 seconds
+    - MQTT topics restructured: USER (PHONE APP) <----> HOST (.PY APP) <------> DEVICE
+    - Log patient's information into .csv file
+'''
 
+import os
 import sys
-import struct
-import zlib
-from PyQt6.QtWidgets import QMainWindow, QApplication, QLabel, QListWidgetItem, QWidget, QGridLayout, QHBoxLayout
-from PyQt6.QtCore import Qt, QSize, QByteArray, pyqtSignal
-from PyQt6.QtGui import QIcon, QPixmap, QFont
+import logging  # Add logging module
+import json  # Import JSON for parsing incoming data
 
-from enum import Enum
+from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QLabel, QWidget
+from PyQt6.QtCore import pyqtSlot, QTimer, QThread, pyqtSignal, QElapsedTimer
+import pyqtgraph as pg
+import numpy as np
 import time
-
-# Import the UI class from the 'main_ui' module
-from main_ui import Ui_MainWindow
-from dashboard_page import DashboardPage
-from config_page import ConfigPage
-from setting_page import SettingPage
-
-#--------------------------------------------------------------------------------------------------
-#                                       CONSTANT VARIABLES
-#--------------------------------------------------------------------------------------------------
+from collections import deque
+from data_logger import DataLogger
+from mqtt_client import MqttClient
 
 
-#--------------------------------------------------------------------------------------------------
-#                                       MAIN WINDOWN CLASS
-#--------------------------------------------------------------------------------------------------
-class MainWindow(QMainWindow):
-    '''
-        MainWindow Class
-    '''
-    # Global Signals Definition
-    deviceConnectedSignal = pyqtSignal(bool)
+import base64  # Import base64 for encoding
 
+from main_window import Ui_MainWindow  # This comes from the .ui converted file
+from dashboard import Ui_Form  # This comes from the .ui converted file
+
+from my_filter import highpass_filter, bandpass_filter, apply_notch_filter, wavelet_denoise  # Import filter functions
+
+# HiveMQ Cloud Credentials
+BROKER = os.getenv("MQTT_BROKER", "700be638167b43289186dff783367cc3.s1.eu.hivemq.cloud")
+PORT = int(os.getenv("MQTT_PORT", 8883))
+USERNAME = os.getenv("MQTT_USERNAME", "ngocdo")
+PASSWORD = os.getenv("MQTT_PASSWORD", "Ng19102002")
+DEVICE_ID = "VX_CEA362"  # Device ID for MQTT topics
+USER_ID = "USER_1"  # User ID for MQTT topics
+
+# MQTT Subscribe Topics
+TOPIC_DEVICE_STATUS = f"device/{DEVICE_ID}/status_online"
+TOPIC_DEVICE_DATA = f"device/{DEVICE_ID}/data"
+TOPIC_DEVICE_RESP_START = f"device/{DEVICE_ID}/responses/start"
+TOPIC_USER_CMD_START = f"host/{USER_ID}/commands/start"
+TOPIC_USER_CMD_SAVE = f"host/{USER_ID}/commands/save"
+TOPIC_USER_CMD_DURATION = f"host/{USER_ID}/commands/record_length"
+TOPIC_USER_INFO = f"host/{USER_ID}/user_info"
+TOPIC_USER_SCREENSHOT = f"host/{USER_ID}/screenshot"  # Topic for screenshots
+
+# MQTT Publish Topics
+TOPIC_DEVICE_CMD_START = f"device/{DEVICE_ID}/commands/start"
+TOPIC_HOST_STATUS = f"host/status_online"
+TOPIC_USER_DEVICE = f"host/{USER_ID}/device"
+TOPIC_USER_RESP_START = f"host/{USER_ID}/responses/start"
+TOPIC_USER_MSG = f"host/{USER_ID}/message"
+TOPIC_USER_RESP_DURATION = f"host/{USER_ID}/responses/record_length" # both subscribe and publish topic
+
+# List of (topic, QoS) in order: status, cmd, data
+TOPICS_SUBSCRIBE = [
+    (TOPIC_DEVICE_STATUS, 1),
+    (TOPIC_DEVICE_DATA, 2),
+    (TOPIC_USER_CMD_START, 1),
+    (TOPIC_USER_CMD_SAVE, 1),
+    (TOPIC_USER_CMD_DURATION, 1),
+    (TOPIC_DEVICE_RESP_START, 1),
+    (TOPIC_USER_RESP_DURATION, 1),
+    (f"{TOPIC_USER_INFO}/#", 1),  # Subscribe to all subtopics of user info
+]
+
+class DataProcessingThread(QThread):
+    signal_status_msg = pyqtSignal(str)
+    # signal_reset_series = pyqtSignal()  # Signal to reset all series values
+
+    def __init__(self, ecg_curve, ppg_curve, gsr_curve, data_logger):
+        super().__init__()
+        from queue import Queue  # Use thread-safe queue
+        self.data_queue = Queue()  # Thread-safe queue for incoming data
+        self.running = True
+        self.ecg_curve = ecg_curve
+        self.ppg_curve = ppg_curve
+        self.gsr_curve = gsr_curve
+        self.data_logger = data_logger  # Pass the DataLogger instance
+        
+        maxlen = 500  # Maximum length for deque
+        self.time_series = deque([0], maxlen)  # Time series for plotting
+        self.ir_series = deque([0], maxlen)  # IR channel series
+        self.red_series = deque([0], maxlen)
+        self.ecg_series = deque([0], maxlen)  # ECG series
+        self.gsr_series = deque([0], maxlen)  # GSR series
+        self.ppg_series = deque([0], maxlen)  # PPG series
+
+        # self.signal_reset_series.emit()  # Emit signal to reset series during initialization
+
+    def run(self):
+        while self.running:
+            if not self.data_queue.empty():
+                data = self.data_queue.get()  # Thread-safe access
+                self.process_and_plot_data(data)
+
+    def process_and_plot_data(self, data):
+        # Extract sensor data from the JSON message
+        time_list = data.get("time", [])
+        ir_list = data.get("ir", [])
+        red_list = data.get("red", [])
+        ecg_list = data.get("ecg", [])
+        gsr_list = data.get("gsr", [])
+
+        # Ensure they are lists and have the same length
+        if not all(isinstance(lst, list) for lst in [time_list, ir_list, red_list, ecg_list, gsr_list]) or \
+           not all(len(lst) == len(time_list) for lst in [ir_list, red_list, ecg_list, gsr_list]):
+            self.signal_status_msg.emit("❌ Invalid or mismatched data format.")
+            return
+
+        # Check if the first element of the time list is not larger than the last element in the time_series
+        if time_list[0] <= self.time_series[-1]:
+            self._plot_missing_data(time_list)
+            print("❌ Error: Time series is not in ascending order. Data not added.")
+        else:
+            self._process_valid_data(time_list, ir_list, red_list, ecg_list, gsr_list)
+
+
+    def _plot_missing_data(self, time_list):
+        # Plot missing data with placeholder values
+        time_increment = self.time_series[-1] - self.time_series[-2]
+        extended_time = [self.time_series[-1] + (i + 1) * time_increment for i in range(len(time_list))]
+        placeholder_data = [0] * len(time_list)
+
+        self.ecg_curve.setData(
+            np.concatenate([np.array(self.time_series), np.array(extended_time)]),
+            np.concatenate([np.array(self.ecg_series), np.array(placeholder_data)]),
+            pen='k'
+)
+        self.ppg_curve.setData(
+            np.concatenate([np.array(self.time_series), np.array(extended_time)]),
+            np.concatenate([np.array(self.ppg_series), np.array(placeholder_data)]),
+            pen='k'
+)
+        self.gsr_curve.setData(
+            np.concatenate([np.array(self.time_series), np.array(extended_time)]),
+            np.concatenate([np.array(self.gsr_series), np.array(placeholder_data)]),
+            pen='k'
+)
+
+    def _process_valid_data(self, time_list, ir_list, red_list, ecg_list, gsr_list):
+        # Compute PPG Avg and apply filters
+        ppg_avg_list = [-1 * (ir + red) / 2 for ir, red in zip(ir_list, red_list)]
+
+        filtered_ppg_avg_list = highpass_filter(ppg_avg_list, cutoff=0.5, fs=100)
+        filtered_ecg_list = highpass_filter(ecg_list, cutoff=0.5, fs=100)
+        filtered_gsr_list = highpass_filter(gsr_list, cutoff=0.5, fs=100)
+
+        # Extend the series with the new data
+        self.time_series.extend(time_list)
+        self.ir_series.extend(ir_list)
+        self.red_series.extend(red_list)
+        self.ecg_series.extend(filtered_ecg_list)
+        self.gsr_series.extend(filtered_gsr_list)
+        self.ppg_series.extend(filtered_ppg_avg_list)
+
+        # Update plots
+        self.ecg_curve.setData(np.array(self.time_series), np.array(self.ecg_series), pen='r')
+        self.ppg_curve.setData(np.array(self.time_series), np.array(self.ppg_series), pen='b')
+        self.gsr_curve.setData(np.array(self.time_series), np.array(self.gsr_series), pen='m')
+
+        # Log data to CSV if logging is active
+        if self.data_logger.is_logging:
+            self.data_logger.write_batch_to_csv(
+                time_list, filtered_gsr_list, filtered_ecg_list,
+                ir_list, red_list, filtered_ppg_avg_list
+            )
+
+    def add_data(self, data):
+        self.data_queue.put(data)  # Thread-safe addition
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+class MainWindow(QMainWindow, Ui_MainWindow):
     def __init__(self):
         super().__init__()
+        self.setupUi(self)
 
-        # Global variables
-        self.isDeviceConnected = False
-
-        # Initialize the UI from the generated UI classes
-        self.ui = Ui_MainWindow()
-        self.ui.setupUi(self)
-
-        self.ConfigPage = ConfigPage()
-        self.ui.page_Configuration = self.ConfigPage
-
-        self.SettingPage = SettingPage()
-        self.ui.page_Settings = self.SettingPage
+        # Start MQTT thread
+        self.mqtt = MqttClient(BROKER, PORT, USERNAME, PASSWORD, TOPICS_SUBSCRIBE)
+        self.mqtt.signal_receivedPayload.connect(self.handle_mqtt_msg)  # Connect to the signal
+        self.mqtt.signal_statusBar_debugMsg.connect(self.show_statusBar_msg)
+        self.mqtt.start()
         
-        self.DashboardPage = DashboardPage()
-        self.ui.page_Dashboard = self.DashboardPage
+        # Initialize DEVICE_ID as a class attribute
+        self.device_id = DEVICE_ID  # Default value
+        self.label_device_name.setText(self.device_id)  # Update the UI
+        self.mqtt.publish_message(f"{TOPIC_USER_DEVICE}/name", DEVICE_ID, retain=True)  # Send online status to the device
 
-        #------------- Set main window properties
-        self.setWindowIcon(QIcon("./icon/Logo.png"))
-        self.setWindowTitle("Vital-X Dashboard")
+        # Start DataLogger thread
+        self.data_logger = DataLogger()
+        self.data_logger.signal_statusBar_debugMsg.connect(self.show_statusBar_msg)
+        self.data_logger.start()  # Start the DataLogger thread
 
-        # Set minimum size (width, height)
-        self.setMinimumSize(1280, 720)
+        self.button_read_start.setEnabled(False)  # Disable button until online
+        self.button_read_stop.setEnabled(False)  # Disable button until online
+        self.button_read_start.clicked.connect(lambda: self.mqtt.publish_message(TOPIC_DEVICE_CMD_START, "true"))  # Start reading and publishing data
+        self.button_read_stop.clicked.connect(lambda: self.mqtt.publish_message(TOPIC_DEVICE_CMD_START, "false"))  # Stop reading and publishing data
 
-        #------------- Initialize UI elements
-        self.title_label = self.ui.title_label
-        font = QFont()
-        font.setPointSize(16)
-        font.setBold(True)
-        self.title_label.setFont(font)
-        self.title_label.setText("Vital-X Dashboard")
+        # Connect the button to the save file dialog
+        # self.button_save.clicked.connect(self.save_csv_on_toggle)
 
-        self.title_icon = self.ui.title_icon
-        self.title_icon.setText("")
-        self.title_icon.setPixmap(QPixmap("./icon/Logo.png"))
-        self.title_icon.setScaledContents(True)
+        # Initialize the hidden dashboard window
+        self.dashboard_window = QWidget()
+        self.dashboard_ui = Ui_Form()
+        self.dashboard_ui.setupUi(self.dashboard_window)
+        self._initialize_dashboard_graphs()
 
-        self.side_menu = self.ui.listWidget
-        self.side_menu.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.side_menu_icon_only = self.ui.listWidget_icon_only
-        self.side_menu_icon_only.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.side_menu_icon_only.hide()
+        # Initialize data processing thread
+        self.data_thread = DataProcessingThread(self.ecg_curve, self.ppg_curve, self.gsr_curve, self.data_logger)
+        self.data_thread.signal_status_msg.connect(self.show_statusBar_msg)
+        self.data_thread.start()
 
-        self.menu_btn = self.ui.menu_btn
-        self.menu_btn.setText("")
-        self.menu_btn.setIcon(QIcon("./icon/close.svg"))
-        self.menu_btn.setIconSize(QSize(30, 30))
-        self.menu_btn.setCheckable(True)
-        self.menu_btn.setChecked(False)
+        # Connect button_save toggled signal to a slot
+        self.button_save_start.setEnabled(False)  # Disable button until online
+        self.button_save_stop.setEnabled(False)  # Disable button until online
+        self.button_save_start.clicked.connect(self.handle_save_start)
+        self.button_save_stop.clicked.connect(self.handle_save_stop)
 
-        self.main_content = self.ui.stackedWidget
+        # Add permanent widgets to the status bar
+        self.elapsed_time = 0
+        self.elapsed_time_label = QLabel("elapsed logging time: ...")
+        self.statusBar().addPermanentWidget(self.elapsed_time_label)
 
-        #------------- Initialize a status bar
-        self.status = self.statusBar()
+        # Initialize a single timer for elapsed time updates
+        self.elapsed_time_timer = QTimer()
+        self.elapsed_time_timer.timeout.connect(self._update_logging_status)
 
-        # Create a QWidget to hold the icon and label
-        self.status_widget = QWidget()
-        self.status_layout = QHBoxLayout()
-        self.status_widget.setLayout(self.status_layout)
+        # Initialize message queue for status messages
+        self.message_queue = deque()
+        self.message_timer = QTimer()
+        self.message_timer.timeout.connect(self._process_message_queue)
+        self.message_timer.start(1000)  # Process messages every 1 second
 
-        # Create a QLabel for the text
-        self.label_ConnectStatus = QLabel("Device not Connected")
+        self.mqtt.publish_message(TOPIC_HOST_STATUS, "true", retain=True)  # Send online status to the device
 
-        # Create a QLabel for the icon
-        self.label_ConnectStatusIcon = QLabel()
-        self.label_ConnectStatusIcon.setPixmap(QPixmap("./icon/disconnected_radio_button.svg"))
+        # Connect button_waveform to toggle the dashboard visibility
+        self.button_waveform.clicked.connect(self._toggle_dashboard_visibility)
 
-        # Add the icon and text labels to the self.status_layout
-        self.status_layout.addWidget(self.label_ConnectStatus)
-        self.status_layout.addWidget(self.label_ConnectStatusIcon)
+        # Initialize save duration
+        self.save_duration = None  # Save duration in seconds
+        self.user_info = {}  # Dictionary to store user info
 
-        # Add spacing between icon and text (optional)
-        self.status_layout.setSpacing(5)
+        self.read_timer = QTimer()  # Timer to handle auto toggle of read_stop and read_start
+        self.read_timer.timeout.connect(self._auto_toggle_read_buttons)
+        self.read_elapsed_time = 0  # Track elapsed time since read_start
 
-        # Add the status widget to the status bar
-        self.status.addPermanentWidget(self.status_widget)
+    def _initialize_dashboard_graphs(self):
+        """Initialize graphs in the dashboard window."""
+        self.ecg_graph = pg.PlotWidget(labels={'left': 'Amplitude', 'bottom': 'Time [ms]'}, background='w')
+        self.dashboard_ui.plotLayout_ecg.addWidget(self.ecg_graph)
+        self.ecg_curve = self.ecg_graph.plot()
+        self.ecg_graph.showGrid(x=True, y=True)
 
-        #------------- Define a list of menu items with names and icons
-        self.menu_list = [
-            {
-                "name": "Dashboard",
-                "icon": "./icon/dashboard.svg",
-                "page": self.ui.page_Dashboard
-            },
-            {
-                "name": "Monitoring",
-                "icon": "./icon/reports.svg",
-                "page": self.ui.page_Monitoring
-            },
-            {
-                "name": "Control",
-                "icon": "./icon/control.svg",
-                "page": self.ui.page_Control
-            },
-            {
-                "name": "Configuration",
-                "icon": "./icon/configuration.svg",
-                "page": self.ui.page_Configuration
-            },
-            {
-                "name": "Settings",
-                "icon": "./icon/settings.svg",
-                "page": self.ui.page_Settings
-            },
-            {
-                "name": "About",
-                "icon": "./icon/about.svg",
-                "page": self.ui.page_About
-            },
-        ]
+        self.ppg_graph = pg.PlotWidget(labels={'left': 'Amplitude', 'bottom': 'Time [ms]'}, background='w')
+        self.dashboard_ui.plotLayout_ppg.addWidget(self.ppg_graph)
+        self.ppg_curve = self.ppg_graph.plot()
+        self.ppg_graph.showGrid(x=True, y=True)
 
-        #------------- Initialize the UI elements and slots
-        self.init_list_widget()
-        self.init_stackwidget()
-        self.init_signal_slot()
+        self.gsr_graph = pg.PlotWidget(labels={'left': 'Amplitude', 'bottom': 'Time [ms]'}, background='w')
+        self.dashboard_ui.plotLayout_gsr.addWidget(self.gsr_graph)
+        self.gsr_curve = self.gsr_graph.plot()
+        self.gsr_graph.showGrid(x=True, y=True)
 
-        #------------- Globally Used variables declaration
-
-
-    def init_list_widget(self):
-        # Initialize the side menu and side menu with icons only
-        self.side_menu_icon_only.clear()
-        self.side_menu.clear()
-
-        for menu in self.menu_list:
-            # Set items for the side menu with icons only
-            item = QListWidgetItem()
-            item.setIcon(QIcon(menu.get("icon")))
-            item.setSizeHint(QSize(40, 40))
-            self.side_menu_icon_only.addItem(item)
-            self.side_menu_icon_only.setCurrentRow(0)
-
-            # Set items for the side menu with icons and text
-            item_new = QListWidgetItem()
-            item_new.setIcon(QIcon(menu.get("icon")))
-            item_new.setText(menu.get("name"))
-            self.side_menu.addItem(item_new)
-            self.side_menu.setCurrentRow(0)
-
-    def init_stackwidget(self):
-        # Initialize the stack widget with content pages
-        widget_list = self.main_content.findChildren(QWidget)
-        for widget in widget_list:
-            self.main_content.removeWidget(widget)
-
-        for menu in self.menu_list:
-            page = menu.get("page")
-            self.main_content.addWidget(page)
-
-    def button_icon_change(self, status):
-        # Change the menu button icon based on its status
-        if status:
-            self.menu_btn.setIcon(QIcon("./icon/open.svg"))
+    def _toggle_dashboard_visibility(self):
+        """Toggle the visibility of the dashboard window."""
+        if self.dashboard_window.isVisible():
+            self.dashboard_window.hide()
         else:
-            self.menu_btn.setIcon(QIcon("./icon/close.svg"))
+            self.dashboard_window.show()
+            
+    def _update_logging_status(self):
+        self.elapsed_time += 1  # Calculate elapsed time in seconds
+        self.mqtt.publish_message(f"{TOPIC_USER_MSG}/time_elapsed", str(self.elapsed_time))  # Send elapsed time to the device
+        self.elapsed_time_label.setText(f"elapsed logging time: {self.elapsed_time} seconds")
+        if self.save_duration is not None and self.elapsed_time >= self.save_duration:
+            self.handle_save_stop()
 
-    def init_signal_slot(self):
-        '''
-            Function to Initialize Signal-Slot
-        '''
-        # Connect signals and slots for menu button and side menu
-        self.menu_btn.toggled['bool'].connect(self.side_menu.setHidden)
-        self.menu_btn.toggled['bool'].connect(self.title_label.setHidden)
-        self.menu_btn.toggled['bool'].connect(self.side_menu_icon_only.setVisible)
-        self.menu_btn.toggled['bool'].connect(self.title_icon.setHidden)
+    def _process_message_queue(self):
+        if self.message_queue:
+            self.message_queue.popleft()
 
-        # Connect signals and slots for switching between menu items
-        self.side_menu.currentRowChanged['int'].connect(self.main_content.setCurrentIndex)
-        self.side_menu_icon_only.currentRowChanged['int'].connect(self.main_content.setCurrentIndex)
-        self.side_menu.currentRowChanged['int'].connect(self.side_menu_icon_only.setCurrentRow)
-        self.side_menu_icon_only.currentRowChanged['int'].connect(self.side_menu.setCurrentRow)
-        self.menu_btn.toggled.connect(self.button_icon_change)
+    def _set_online_state(self):
+        self.label_device_name.setText(self.device_id)  # Set device name in the UI
+        self.label_status_icon.setText("🟢 Online")
+        self.button_read_start.setEnabled(True)
+        self.mqtt.publish_message(f"{TOPIC_USER_DEVICE}/status", "true", retain = True)  # Send device online status to the user
 
-        # self.deviceConnectedSignal.connect(self.onDeviceConnectedSignal)
-        # self.SettingPage.serialConectedSignal.connect(self.onDeviceConnectedSignal)
-        # self.SettingPage.serialHandler.data_received.connect(self.readSerialData)
-        # self.DashboardPage.monitorControlSignal.connect(self.onMonitorControlSignal)
-        # self.ConfigPage.bmsConfigSignal.connect(self.onBmsConfigSignal)
+    def _set_offline_state(self):
+        self.label_status_icon.setText("🔴 Offline")
+        self.button_read_start.setEnabled(False)
+        self.button_read_stop.setEnabled(False)
+        self.button_save_start.setEnabled(False)
+        self.button_save_stop.setEnabled(False)
+        self.mqtt.publish_message(f"{TOPIC_USER_DEVICE}/status", "false")  # Send device offline status to the user
 
+    def handle_read_start(self):
+        self.mqtt.publish_message(TOPIC_USER_RESP_START, "true")  
+        self.label_read_status.setText("reading...")
+        self.button_read_stop.setEnabled(True)  # Enable stop button
+        self.button_read_start.setEnabled(False)  # Disable start button
+        self.data_thread.__init__(self.ecg_curve, self.ppg_curve, self.gsr_curve, self.data_logger) # Reinitialize the data processing thread
+        self.button_save_start.setEnabled(True)  # Enable save button
+        self.read_timer.start(1000)  # Check every second
 
-#--------------------------------------------------------------------------------------------------
-#       MAIN PROGRAM
-#--------------------------------------------------------------------------------------------------
-if __name__ == '__main__':
-    app = QApplication(sys.argv)
+    def handle_read_stop(self):
+        self.mqtt.publish_message(TOPIC_USER_RESP_START, "false")  
+        self.label_read_status.setText("stopped")
+        self.button_read_start.setEnabled(True)  # Enable start button
+        self.button_read_stop.setEnabled(False)  # Disable stop button
+        self.button_save_start.setEnabled(False)
+        self.button_save_stop.setEnabled(False)
+        # self.data_thread.signal_reset_series.emit()  # Signal to reset all series values
+        self.button_save_stop.click()
+        self.read_timer.stop()  # Stop the timer
+        
+    def handle_save_start(self):
+        os.makedirs("data", exist_ok=True)  # Create the 'data' folder if it doesn't exist
+        default_filename = os.path.join("data", time.strftime("%Y-%m-%d_%H-%M-%S") + ".csv")
+        print(f"🧾 User Info: {self.user_info}")
+        self.data_logger.start_logging(default_filename, self.user_info)  # Start logging to the selected file
+        self.elapsed_time_timer.start(1000)  # Start the timer to update elapsed time every second
+        self.mqtt.publish_message(f"{TOPIC_USER_MSG}/status", "saving...") # Send saving message to the device
+        self.label_save_status.setText("saving...")
+        self.button_save_start.setEnabled(False)  # Enable save button
+        self.button_save_stop.setEnabled(True)  # Disable stop button
 
-    # Load style file
-    with open("style.qss") as f:
-        style_str = f.read()
+        # if self.save_duration is not None:
+        #     QTimer.singleShot(self.save_duration * 1000, self.handle_save_stop)
+        
+    def handle_save_stop(self):
+        self.data_logger.stop_logging()  # Stop logging
+        self.elapsed_time_timer.stop()  # Stop the timer
+        self.elapsed_time = 0  # Reset elapsed time
+        self.label_save_status.setText("stopped")
+        self.button_save_start.setEnabled(True)
+        self.button_save_stop.setEnabled(False)
+        self.mqtt.publish_message(f"{TOPIC_USER_MSG}/status", "stop saving") # Send stop saving msg to the device
 
-    app.setStyleSheet(style_str)
+    def _auto_toggle_read_buttons(self):
+        self.read_elapsed_time += 1
 
-    window = MainWindow()
-    window.show()
+        if self.read_elapsed_time % 5 == 0:
+            screenshot = self.dashboard_window.grab()  # Capture the screenshot of the dashboard window
+            screenshot_path = os.path.join("data", f"screenshot.png")
+            screenshot.save(screenshot_path)  # Save the screenshot to a file
 
-    sys.exit(app.exec())
+            with open(screenshot_path, "rb") as file:
+                screenshot_data = file.read()  # Read the screenshot file as binary data
+                encoded_data = base64.b64encode(screenshot_data).decode('utf-8')  # Encode to base64
+
+            # Publish the base64-encoded screenshot data over MQTT
+            self.mqtt.publish_message(TOPIC_USER_SCREENSHOT, encoded_data)
+        """Automatically toggle read_stop and read_start after 300 seconds if no logging is running."""
+        if self.read_elapsed_time >= 300 and not self.data_logger.is_logging:
+            self.mqtt.publish_message(TOPIC_USER_RESP_START, "false")  
+            self.mqtt.publish_message(f"{TOPIC_USER_MSG}/status", "restarting...") # Send stop saving msg to the device
+            time.sleep(3)  # Wait for 3 seconds before toggling back
+            self.mqtt.publish_message(TOPIC_USER_RESP_START, "true")  
+            self.read_elapsed_time = 0  # Reset elapsed time
+            print("Auto toggled read buttons after 5 minutes.")
+            self.mqtt.publish_message(f"{TOPIC_USER_MSG}/status", "reading...") # Send stop saving msg to the device
+
+    # --------------- MQTT Signal Handler ---------------
+    @pyqtSlot(str, str)
+    def handle_mqtt_msg(self, topic, payload): # Update the received payload in the UI
+        # Get current timestamp
+        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+
+        # Format the log line with timestamp
+        log_line = f"[{timestamp}] Topic: {topic}\nPayload: {payload}\n"
+
+        # Only append to text_receivedPayload if the dashboard is not visible
+        if not self.dashboard_window.isVisible():
+            # Append to UI
+            self.text_receivedPayload.appendPlainText(log_line)
+            self.text_receivedPayload.verticalScrollBar().setValue(
+                self.text_receivedPayload.verticalScrollBar().maximum()
+            )
+        
+        if topic == TOPIC_DEVICE_STATUS:
+            if payload.lower() == "true":
+                self._set_online_state()
+            elif payload.lower() == "false":
+                self._set_offline_state()
+
+        elif topic == TOPIC_USER_RESP_DURATION:
+            # Handle response from the user regarding save duration
+            try:
+                self.save_duration = int(payload)  # Convert payload to integer
+                self.label_duration_value.setText(f"{self.save_duration} seconds")
+                
+            except ValueError:
+                self.show_statusBar_msg("❌ Invalid save duration value received")
+        
+        elif topic == TOPIC_USER_CMD_DURATION:
+            # Handle save duration from the user
+            try:
+                self.show_statusBar_msg(f"Save duration set to: {payload} seconds")
+                self.mqtt.publish_message(TOPIC_USER_RESP_DURATION, payload, qos = 1, retain=True)  # Send response back to the user
+            except ValueError:
+                self.show_statusBar_msg("❌ Invalid save duration value received")
+
+        elif topic == TOPIC_USER_CMD_START:
+            if payload.lower() == "true":
+                self.button_read_start.click()  # Trigger read start
+            elif payload.lower() == "false":
+                self.button_read_stop.click()  # Trigger read start
+
+        elif topic == TOPIC_USER_CMD_SAVE:
+            if payload.lower() == "true":
+                self.button_save_start.click()
+            elif payload.lower() == "false":
+                self.button_save_stop.click()
+
+        elif topic == TOPIC_DEVICE_RESP_START:
+            if payload.lower() == "true":
+                self.handle_read_start()
+            elif payload.lower() == "false":
+                self.handle_read_stop()
+
+        elif topic == TOPIC_DEVICE_DATA:
+            data = json.loads(payload)
+            if isinstance(data, dict):  # Ensure it's a dictionary
+                self.data_thread.add_data(data)
+            else:
+                raise ValueError("Received data is not a dictionary")
+            # Pass data to the processing thread
+
+        elif topic.startswith(f"{TOPIC_USER_INFO}/"):
+            key = topic.split("/")[-1]  # Extract the last part of the topic as the key
+            self.user_info[key] = payload  # Store the payload in the user_info dictionary
+            print(f"User info updated: {key} = {payload}")  # Log the update
+
+            # Update the corresponding label
+            if key == "id":
+                self.label_id_value.setText(payload)
+            elif key == "age":
+                self.label_age_value.setText(payload)
+            elif key == "gender":
+                self.label_gender_value.setText(payload)
+            elif key == "weight":
+                self.label_weight_value.setText(payload)
+            elif key == "height":
+                self.label_height_value.setText(payload)
+
+        else:
+            # Handle other topics as needed
+            self.show_statusBar_msg(f"Unhandled topic: {topic}")
+
+    @pyqtSlot(str)
+    def show_statusBar_msg(self, message):
+        logging.info(f"Status Bar Message: {message}")  # Use logging instead of print
+        self.message_queue.append(message)  # Add message to the queue
+        # Show temporary message in the status bar for 1 second
+        self.statusBar().showMessage(message)
+        QTimer.singleShot(1000, lambda: self.statusBar().clearMessage())
+
+    def closeEvent(self, event):
+        """Ensure all resources are cleaned up on close."""
+        # Publish the last will message explicitly before closing
+        self.mqtt.publish_message(TOPIC_HOST_STATUS, "false", retain=True)
+        self.mqtt.publish_message(f"{TOPIC_USER_DEVICE}/status", "false", retain=True)
+        self.mqtt.publish_message(TOPIC_DEVICE_CMD_START, "false")
+        self.mqtt.publish_message(TOPIC_USER_RESP_START, "false")
+
+        # Stop all threads and timers
+        self.data_logger.stop()
+        self.data_thread.stop()
+        self.mqtt.stop()
+        self.elapsed_time_timer.stop()
+        self.read_timer.stop()
+        self.message_timer.stop()
+        self.message_queue.clear()  # Clear any remaining messages
+
+        super().closeEvent(event)
+
+app = QApplication(sys.argv)
+window = MainWindow()
+window.show()
+sys.exit(app.exec())
