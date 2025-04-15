@@ -88,4 +88,6 @@ fp-info-cache
 
 ### PyQt cache
 *cache*/
+/firmware/esp32-VitalX/.vscode
 software/data/screenshot.png
+software/fiter_design.ipynb

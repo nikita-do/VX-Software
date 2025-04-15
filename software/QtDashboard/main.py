@@ -45,6 +45,7 @@ TOPIC_USER_CMD_SAVE = f"host/{USER_ID}/commands/save"
 TOPIC_USER_CMD_DURATION = f"host/{USER_ID}/commands/record_length"
 TOPIC_USER_INFO = f"host/{USER_ID}/user_info"
 TOPIC_USER_SCREENSHOT = f"host/{USER_ID}/screenshot"  # Topic for screenshots
+TOPIC_USER_RESP_DURATION = f"host/{USER_ID}/responses/record_length" 
 
 # MQTT Publish Topics
 TOPIC_DEVICE_CMD_START = f"device/{DEVICE_ID}/commands/start"
@@ -52,7 +53,6 @@ TOPIC_HOST_STATUS = f"host/status_online"
 TOPIC_USER_DEVICE = f"host/{USER_ID}/device"
 TOPIC_USER_RESP_START = f"host/{USER_ID}/responses/start"
 TOPIC_USER_MSG = f"host/{USER_ID}/message"
-TOPIC_USER_RESP_DURATION = f"host/{USER_ID}/responses/record_length" # both subscribe and publish topic
 
 # List of (topic, QoS) in order: status, cmd, data
 TOPICS_SUBSCRIBE = [
@@ -146,7 +146,8 @@ class DataProcessingThread(QThread):
 
         filtered_ppg_avg_list = highpass_filter(ppg_avg_list, cutoff=0.5, fs=100)
         filtered_ecg_list = highpass_filter(ecg_list, cutoff=0.5, fs=100)
-        filtered_gsr_list = highpass_filter(gsr_list, cutoff=0.5, fs=100)
+        # filtered_ecg_list = wavelet_denoise(filtered_ecg_list, wavelet='sym4', level=3)
+        filtered_gsr_list = gsr_list
 
         # Extend the series with the new data
         self.time_series.extend(time_list)
@@ -320,7 +321,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         
     def handle_save_start(self):
         os.makedirs("data", exist_ok=True)  # Create the 'data' folder if it doesn't exist
-        default_filename = os.path.join("data", time.strftime("%Y-%m-%d_%H-%M-%S") + ".csv")
+        default_filename = os.path.join(
+            "data", 
+            f"{self.user_info["id"]}_{self.save_duration}_{time.strftime('%Y-%m-%d_%H-%M-%S')}.csv"
+        )
         print(f"🧾 User Info: {self.user_info}")
         self.data_logger.start_logging(default_filename, self.user_info)  # Start logging to the selected file
         self.elapsed_time_timer.start(1000)  # Start the timer to update elapsed time every second
@@ -343,6 +347,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def _auto_toggle_read_buttons(self):
         self.read_elapsed_time += 1
+        self.mqtt.publish_message(f"{TOPIC_USER_MSG}/time_elapsed_since_last_restart", str(self.read_elapsed_time))  # Send elapsed time to the device 
 
         if self.read_elapsed_time % 5 == 0:
             screenshot = self.dashboard_window.grab()  # Capture the screenshot of the dashboard window
@@ -357,10 +362,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.mqtt.publish_message(TOPIC_USER_SCREENSHOT, encoded_data)
         """Automatically toggle read_stop and read_start after 300 seconds if no logging is running."""
         if self.read_elapsed_time >= 300 and not self.data_logger.is_logging:
-            self.mqtt.publish_message(TOPIC_USER_RESP_START, "false")  
+            self.mqtt.publish_message(TOPIC_DEVICE_CMD_START, "false") 
             self.mqtt.publish_message(f"{TOPIC_USER_MSG}/status", "restarting...") # Send stop saving msg to the device
             time.sleep(3)  # Wait for 3 seconds before toggling back
-            self.mqtt.publish_message(TOPIC_USER_RESP_START, "true")  
+            self.mqtt.publish_message(TOPIC_DEVICE_CMD_START, "true")
             self.read_elapsed_time = 0  # Reset elapsed time
             print("Auto toggled read buttons after 5 minutes.")
             self.mqtt.publish_message(f"{TOPIC_USER_MSG}/status", "reading...") # Send stop saving msg to the device
@@ -388,20 +393,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             elif payload.lower() == "false":
                 self._set_offline_state()
 
-        elif topic == TOPIC_USER_RESP_DURATION:
-            # Handle response from the user regarding save duration
-            try:
-                self.save_duration = int(payload)  # Convert payload to integer
-                self.label_duration_value.setText(f"{self.save_duration} seconds")
-                
-            except ValueError:
-                self.show_statusBar_msg("❌ Invalid save duration value received")
-        
         elif topic == TOPIC_USER_CMD_DURATION:
             # Handle save duration from the user
             try:
                 self.show_statusBar_msg(f"Save duration set to: {payload} seconds")
                 self.mqtt.publish_message(TOPIC_USER_RESP_DURATION, payload, qos = 1, retain=True)  # Send response back to the user
+                self.save_duration = int(payload)  # Convert payload to integer
+                self.label_duration_value.setText(f"{self.save_duration} seconds")
+                
             except ValueError:
                 self.show_statusBar_msg("❌ Invalid save duration value received")
 
