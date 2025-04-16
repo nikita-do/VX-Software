@@ -1,18 +1,17 @@
-''' Software v0.2.0:
+''' Software v0.2.1:
     Feature:
-    - Auto restart device and reset timestamp after 5 minutes of activity
-    - Publish captured waveforms every 5 seconds
-    - MQTT topics restructured: USER (PHONE APP) <----> HOST (.PY APP) <------> DEVICE
-    - Log patient's information into .csv file
+    - Dynamically update device id, mqtt topics and sampling rate
+    - Decode CBOR data from device and parse it to JSON
 '''
 
 import os
 import sys
 import logging  # Add logging module
 import json  # Import JSON for parsing incoming data
+import base64  # Import base64 for encoding image
 
-from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog, QLabel, QWidget
-from PyQt6.QtCore import pyqtSlot, QTimer, QThread, pyqtSignal, QElapsedTimer
+from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QWidget
+from PyQt6.QtCore import pyqtSlot, QTimer, QThread, pyqtSignal
 import pyqtgraph as pg
 import numpy as np
 import time
@@ -20,26 +19,29 @@ from collections import deque
 from data_logger import DataLogger
 from mqtt_client import MqttClient
 
-
-import base64  # Import base64 for encoding
-
 from main_window import Ui_MainWindow  # This comes from the .ui converted file
 from dashboard import Ui_Form  # This comes from the .ui converted file
 
-from my_filter import highpass_filter, bandpass_filter, apply_notch_filter, wavelet_denoise  # Import filter functions
+from my_filter import highpass_filter  # Import filter functions
+
+SAMPLING_RATE = 100  # Sampling rate in Hz (default: 250 Hz)
+SAMPLE_BATCH = 100  # Sampling rate in Hz (default: 250 Hz)
+MAX_PLOT_LENGTH = 5  # Maximum length of the plot in seconds
 
 # HiveMQ Cloud Credentials
 BROKER = os.getenv("MQTT_BROKER", "700be638167b43289186dff783367cc3.s1.eu.hivemq.cloud")
 PORT = int(os.getenv("MQTT_PORT", 8883))
 USERNAME = os.getenv("MQTT_USERNAME", "ngocdo")
 PASSWORD = os.getenv("MQTT_PASSWORD", "Ng19102002")
-DEVICE_ID = "VX_CEA362"  # Device ID for MQTT topics
+DEVICE_ID = None  # Device ID for MQTT topics
 USER_ID = "USER_1"  # User ID for MQTT topics
 
 # MQTT Subscribe Topics
-TOPIC_DEVICE_STATUS = f"device/{DEVICE_ID}/status_online"
-TOPIC_DEVICE_DATA = f"device/{DEVICE_ID}/data"
-TOPIC_DEVICE_RESP_START = f"device/{DEVICE_ID}/responses/start"
+TOPIC_DEVICE_STATUS = None
+TOPIC_DEVICE_ATTR_FS = None
+TOPIC_DEVICE_ATTR_N = None
+TOPIC_DEVICE_DATA = None
+TOPIC_DEVICE_RESP_START = None
 TOPIC_USER_CMD_START = f"host/{USER_ID}/commands/start"
 TOPIC_USER_CMD_SAVE = f"host/{USER_ID}/commands/save"
 TOPIC_USER_CMD_DURATION = f"host/{USER_ID}/commands/record_length"
@@ -48,23 +50,12 @@ TOPIC_USER_SCREENSHOT = f"host/{USER_ID}/screenshot"  # Topic for screenshots
 TOPIC_USER_RESP_DURATION = f"host/{USER_ID}/responses/record_length" 
 
 # MQTT Publish Topics
-TOPIC_DEVICE_CMD_START = f"device/{DEVICE_ID}/commands/start"
+TOPIC_DEVICE_CMD_START = None
 TOPIC_HOST_STATUS = f"host/status_online"
 TOPIC_USER_DEVICE = f"host/{USER_ID}/device"
 TOPIC_USER_RESP_START = f"host/{USER_ID}/responses/start"
 TOPIC_USER_MSG = f"host/{USER_ID}/message"
 
-# List of (topic, QoS) in order: status, cmd, data
-TOPICS_SUBSCRIBE = [
-    (TOPIC_DEVICE_STATUS, 1),
-    (TOPIC_DEVICE_DATA, 2),
-    (TOPIC_USER_CMD_START, 1),
-    (TOPIC_USER_CMD_SAVE, 1),
-    (TOPIC_USER_CMD_DURATION, 1),
-    (TOPIC_DEVICE_RESP_START, 1),
-    (TOPIC_USER_RESP_DURATION, 1),
-    (f"{TOPIC_USER_INFO}/#", 1),  # Subscribe to all subtopics of user info
-]
 
 class DataProcessingThread(QThread):
     signal_status_msg = pyqtSignal(str)
@@ -80,7 +71,7 @@ class DataProcessingThread(QThread):
         self.gsr_curve = gsr_curve
         self.data_logger = data_logger  # Pass the DataLogger instance
         
-        maxlen = 500  # Maximum length for deque
+        maxlen = SAMPLE_BATCH * MAX_PLOT_LENGTH  # Maximum length for deque, 5 seconds plot
         self.time_series = deque([0], maxlen)  # Time series for plotting
         self.ir_series = deque([0], maxlen)  # IR channel series
         self.red_series = deque([0], maxlen)
@@ -144,8 +135,8 @@ class DataProcessingThread(QThread):
         # Compute PPG Avg and apply filters
         ppg_avg_list = [-1 * (ir + red) / 2 for ir, red in zip(ir_list, red_list)]
 
-        filtered_ppg_avg_list = highpass_filter(ppg_avg_list, cutoff=0.5, fs=100)
-        filtered_ecg_list = highpass_filter(ecg_list, cutoff=0.5, fs=100)
+        filtered_ppg_avg_list = highpass_filter(ppg_avg_list, cutoff=0.5, fs=SAMPLING_RATE)
+        filtered_ecg_list = highpass_filter(ecg_list, cutoff=0.5, fs=SAMPLING_RATE)
         # filtered_ecg_list = wavelet_denoise(filtered_ecg_list, wavelet='sym4', level=3)
         filtered_gsr_list = gsr_list
 
@@ -181,16 +172,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         super().__init__()
         self.setupUi(self)
 
+        # Initialize DEVICE_ID as None initially
+        self.device_id = None
+
         # Start MQTT thread
-        self.mqtt = MqttClient(BROKER, PORT, USERNAME, PASSWORD, TOPICS_SUBSCRIBE)
+        self.mqtt = MqttClient(BROKER, PORT, USERNAME, PASSWORD)
         self.mqtt.signal_receivedPayload.connect(self.handle_mqtt_msg)  # Connect to the signal
         self.mqtt.signal_statusBar_debugMsg.connect(self.show_statusBar_msg)
         self.mqtt.start()
-        
-        # Initialize DEVICE_ID as a class attribute
-        self.device_id = DEVICE_ID  # Default value
-        self.label_device_name.setText(self.device_id)  # Update the UI
-        self.mqtt.publish_message(f"{TOPIC_USER_DEVICE}/name", DEVICE_ID, retain=True)  # Send online status to the device
 
         # Start DataLogger thread
         self.data_logger = DataLogger()
@@ -286,7 +275,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.message_queue.popleft()
 
     def _set_online_state(self):
-        self.label_device_name.setText(self.device_id)  # Set device name in the UI
         self.label_status_icon.setText("🟢 Online")
         self.button_read_start.setEnabled(True)
         self.mqtt.publish_message(f"{TOPIC_USER_DEVICE}/status", "true", retain = True)  # Send device online status to the user
@@ -300,7 +288,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.mqtt.publish_message(f"{TOPIC_USER_DEVICE}/status", "false")  # Send device offline status to the user
 
     def handle_read_start(self):
-        self.mqtt.publish_message(TOPIC_USER_RESP_START, "true")  
+        self.mqtt.publish_message(TOPIC_USER_RESP_START, "true", retain=True)  
         self.label_read_status.setText("reading...")
         self.button_read_stop.setEnabled(True)  # Enable stop button
         self.button_read_start.setEnabled(False)  # Disable start button
@@ -309,7 +297,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.read_timer.start(1000)  # Check every second
 
     def handle_read_stop(self):
-        self.mqtt.publish_message(TOPIC_USER_RESP_START, "false")  
+        self.mqtt.publish_message(TOPIC_USER_RESP_START, "false", retain=True)  
         self.label_read_status.setText("stopped")
         self.button_read_start.setEnabled(True)  # Enable start button
         self.button_read_stop.setEnabled(False)  # Disable stop button
@@ -372,22 +360,54 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     # --------------- MQTT Signal Handler ---------------
     @pyqtSlot(str, str)
-    def handle_mqtt_msg(self, topic, payload): # Update the received payload in the UI
+    def handle_mqtt_msg(self, topic, payload):  # Update the received payload in the UI
         # Get current timestamp
         timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
 
         # Format the log line with timestamp
         log_line = f"[{timestamp}] Topic: {topic}\nPayload: {payload}\n"
 
-        # Only append to text_receivedPayload if the dashboard is not visible
-        if not self.dashboard_window.isVisible():
-            # Append to UI
-            self.text_receivedPayload.appendPlainText(log_line)
-            self.text_receivedPayload.verticalScrollBar().setValue(
-                self.text_receivedPayload.verticalScrollBar().maximum()
-            )
+        # Append to UI
+        self.text_receivedPayload.appendPlainText(log_line)
+        self.text_receivedPayload.verticalScrollBar().setValue(
+            self.text_receivedPayload.verticalScrollBar().maximum()
+        )
         
-        if topic == TOPIC_DEVICE_STATUS:
+        if topic == "device":
+            # Receive device_id from the "device" topic
+            self.device_id = payload.strip()  # Update device_id
+            self.label_device_name.setText(self.device_id)  # Update the UI
+
+            # Update MQTT topics dynamically
+            global TOPIC_DEVICE_STATUS, TOPIC_DEVICE_DATA, TOPIC_DEVICE_RESP_START, TOPIC_DEVICE_CMD_START, TOPIC_DEVICE_ATTR_FS, TOPIC_DEVICE_ATTR_N
+            TOPIC_DEVICE_STATUS = f"device/{self.device_id}/status_online"
+            TOPIC_DEVICE_ATTR_FS = f"device/{self.device_id}/attributes/sampling_rate" 
+            TOPIC_DEVICE_ATTR_N = f"device/{self.device_id}/attributes/sample_batch" 
+            TOPIC_DEVICE_DATA = f"device/{self.device_id}/data"
+            TOPIC_DEVICE_RESP_START = f"device/{self.device_id}/responses/start"
+            TOPIC_DEVICE_CMD_START = f"device/{self.device_id}/commands/start"
+
+            # Resubscribe to updated topics
+            updated_topics = [
+                (TOPIC_DEVICE_STATUS, 1),
+                (TOPIC_DEVICE_DATA, 2),
+                (TOPIC_DEVICE_RESP_START, 1),
+                (TOPIC_USER_CMD_START, 1),
+                (TOPIC_USER_CMD_SAVE, 1),
+                (TOPIC_USER_CMD_DURATION, 1),
+                (TOPIC_USER_RESP_DURATION, 1),
+                (f"{TOPIC_USER_INFO}/#", 1),
+                (TOPIC_DEVICE_ATTR_FS, 1),
+                (TOPIC_DEVICE_ATTR_N, 1),
+            ]
+            self.mqtt.subscribe_to_topic(updated_topics)
+            self.mqtt.update_data_topic(TOPIC_DEVICE_DATA)  # Update the data topic in the MQTT client
+
+            # Notify the user
+            self.show_statusBar_msg(f"Device ID updated to: {self.device_id}")
+            self.mqtt.publish_message(f"{TOPIC_USER_DEVICE}/name", self.device_id, retain=True)
+
+        elif topic == TOPIC_DEVICE_STATUS:
             if payload.lower() == "true":
                 self._set_online_state()
             elif payload.lower() == "false":
@@ -421,6 +441,16 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self.handle_read_start()
             elif payload.lower() == "false":
                 self.handle_read_stop()
+
+        elif topic == TOPIC_DEVICE_ATTR_FS:
+            global SAMPLING_RATE
+            SAMPLING_RATE = int(payload)  # Update the sampling rate
+            print(f"Sampling rate updated to: {SAMPLING_RATE} Hz")
+
+        elif topic == TOPIC_DEVICE_ATTR_N:
+            global SAMPLE_BATCH
+            SAMPLE_BATCH = int(payload)  # Update the sampling rate
+            print(f"Number of samples per batch updated to: {SAMPLE_BATCH} Hz")
 
         elif topic == TOPIC_DEVICE_DATA:
             data = json.loads(payload)

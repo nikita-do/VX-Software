@@ -2,7 +2,7 @@ from scipy.signal import butter, filtfilt, iirnotch, lfilter
 import pywt
 import numpy as np
 
-def highpass_filter(data, cutoff=0.5, fs=100, order=4):
+def highpass_filter(data, fs, cutoff=0.5, order=4):
     """
     High-pass filters data using a Butterworth filter.
 
@@ -15,10 +15,10 @@ def highpass_filter(data, cutoff=0.5, fs=100, order=4):
     Returns:
         list: Filtered signal.
     """
-    b, a = butter(order, cutoff, btype='highpass', fs=fs)
+    b, a = butter(order, cutoff, btype='highpass', fs = fs)
     return filtfilt(b, a, data)
 
-def bandpass_filter(data, lowcut=0.5, highcut=40, fs=100, order=4):
+def bandpass_filter(data, fs, lowcut=0.5, highcut=40, order=4):
     """
     Band-pass filters data using a Butterworth filter.
 
@@ -36,7 +36,7 @@ def bandpass_filter(data, lowcut=0.5, highcut=40, fs=100, order=4):
     b, a = butter(order, [lowcut / nyq, highcut / nyq], btype='band')
     return lfilter(b, a, data)
 
-def apply_notch_filter(data, fs=100, notch_freq=50, Q=30):
+def apply_notch_filter(data, fs, notch_freq=50, Q=30):
     """
     Apply a notch filter to remove a specific frequency.
 
