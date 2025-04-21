@@ -2,6 +2,10 @@ from scipy.signal import butter, filtfilt, iirnotch, lfilter
 import pywt
 import numpy as np
 
+def lowpass_filter(data, cutoff=0.5, fs=100, order=4):
+    b, a = butter(order, cutoff, btype='lowpass', fs=fs)
+    return filtfilt(b, a, data)
+
 def highpass_filter(data, fs, cutoff=0.5, order=4):
     """
     High-pass filters data using a Butterworth filter.

@@ -22,7 +22,7 @@ class MqttClient(QThread):
         self.data_topic = None  # Initialize data topic to None
         self.client = mqtt.Client()
         self.client.username_pw_set(self.username, self.password)
-        self.client.tls_set()  # Enables TLS encryption
+        self.client.tls_set('server.pem')  # Enables TLS encryption
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
 
@@ -68,5 +68,3 @@ class MqttClient(QThread):
         """Subscribe to a specific topic."""
         self.client.subscribe(topic)
         print(f"Subscribed to topic: {topic}")
-
-    

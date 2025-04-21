@@ -1,7 +1,8 @@
-''' Software v0.2.1:
-    Feature:
-    - Dynamically update device id, mqtt topics and sampling rate
-    - Decode CBOR data from device and parse it to JSON
+''' Software v0.2.2:
+    Amend:
+        SAMPLING_RATE correctly default to max value
+        Update ECG DSP pipeline: notch 60Hz -> notch 60Hz -> ButterWorth lowpass 40Hz
+
 '''
 
 import os
@@ -22,9 +23,8 @@ from mqtt_client import MqttClient
 from main_window import Ui_MainWindow  # This comes from the .ui converted file
 from dashboard import Ui_Form  # This comes from the .ui converted file
 
-from my_filter import highpass_filter  # Import filter functions
-
-SAMPLING_RATE = 100  # Sampling rate in Hz (default: 250 Hz)
+from my_filter import highpass_filter, bandpass_filter, apply_notch_filter, wavelet_denoise , lowpass_filter # Import filter functions
+SAMPLING_RATE = 250  # Sampling rate in Hz (default: 250 Hz)
 SAMPLE_BATCH = 100  # Sampling rate in Hz (default: 250 Hz)
 MAX_PLOT_LENGTH = 5  # Maximum length of the plot in seconds
 
@@ -136,8 +136,9 @@ class DataProcessingThread(QThread):
         ppg_avg_list = [-1 * (ir + red) / 2 for ir, red in zip(ir_list, red_list)]
 
         filtered_ppg_avg_list = highpass_filter(ppg_avg_list, cutoff=0.5, fs=SAMPLING_RATE)
-        filtered_ecg_list = highpass_filter(ecg_list, cutoff=0.5, fs=SAMPLING_RATE)
-        # filtered_ecg_list = wavelet_denoise(filtered_ecg_list, wavelet='sym4', level=3)
+        filtered_ecg_list = apply_notch_filter(ecg_list, fs=SAMPLING_RATE, notch_freq=60)
+        filtered_ecg_list = apply_notch_filter(filtered_ecg_list, fs=SAMPLING_RATE, notch_freq=120)
+        filtered_ecg_list = lowpass_filter(filtered_ecg_list, cutoff=40, fs=SAMPLING_RATE)
         filtered_gsr_list = gsr_list
 
         # Extend the series with the new data
