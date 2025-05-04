@@ -57,7 +57,7 @@ class DataLogger(QThread):
         else:
             print("⚠️ Invalid user_info format, expected a dict.")
 
-        self.output_writer.writerow(["Time(ms)", "GSR", "ECG", "IR Channel", "Red Channel", "PPG"])
+        self.output_writer.writerow(["Time(us)", "GSR", "ECG", "IR Channel", "Red Channel", "PPG"])
         self.is_logging = True
         self.signal_statusBar_debugMsg.emit(f"Logging started, file saved as: {filename}")
 

@@ -24,9 +24,9 @@ from main_window import Ui_MainWindow  # This comes from the .ui converted file
 from dashboard import Ui_Form  # This comes from the .ui converted file
 
 from my_filter import highpass_filter, bandpass_filter, apply_notch_filter, wavelet_denoise , lowpass_filter # Import filter functions
-SAMPLING_RATE = 250  # Sampling rate in Hz (default: 250 Hz)
-SAMPLE_BATCH = 100  # Sampling rate in Hz (default: 250 Hz)
-MAX_PLOT_LENGTH = 5  # Maximum length of the plot in seconds
+SAMPLING_RATE = 512  # Sampling rate in Hz (default: 512 Hz)
+SAMPLE_BATCH = 512  # Sample batch (default: 512 samples)
+MAX_PLOT_LENGTH = 5.5  # Maximum length of the plot in seconds
 
 # HiveMQ Cloud Credentials
 BROKER = os.getenv("MQTT_BROKER", "700be638167b43289186dff783367cc3.s1.eu.hivemq.cloud")
@@ -71,7 +71,7 @@ class DataProcessingThread(QThread):
         self.gsr_curve = gsr_curve
         self.data_logger = data_logger  # Pass the DataLogger instance
         
-        maxlen = SAMPLE_BATCH * MAX_PLOT_LENGTH  # Maximum length for deque, 5 seconds plot
+        maxlen = round(SAMPLE_BATCH * MAX_PLOT_LENGTH)  # Maximum length for deque, rounded to the nearest integer
         self.time_series = deque([0], maxlen)  # Time series for plotting
         self.ir_series = deque([0], maxlen)  # IR channel series
         self.red_series = deque([0], maxlen)
@@ -149,10 +149,13 @@ class DataProcessingThread(QThread):
         self.gsr_series.extend(filtered_gsr_list)
         self.ppg_series.extend(filtered_ppg_avg_list)
 
+        # Convert time to seconds for plotting
+        time_in_ms = np.array(self.time_series) / 1000.0
+
         # Update plots
-        self.ecg_curve.setData(np.array(self.time_series), np.array(self.ecg_series), pen='r')
-        self.ppg_curve.setData(np.array(self.time_series), np.array(self.ppg_series), pen='b')
-        self.gsr_curve.setData(np.array(self.time_series), np.array(self.gsr_series), pen='m')
+        self.ecg_curve.setData(time_in_ms, np.array(self.ecg_series), pen='r')
+        self.ppg_curve.setData(time_in_ms, np.array(self.ppg_series), pen='b')
+        self.gsr_curve.setData(time_in_ms, np.array(self.gsr_series), pen='m')
 
         # Log data to CSV if logging is active
         if self.data_logger.is_logging:
@@ -171,6 +174,7 @@ class DataProcessingThread(QThread):
 class MainWindow(QMainWindow, Ui_MainWindow):
     def __init__(self):
         super().__init__()
+        os.makedirs("data", exist_ok=True)  # Create the 'data' folder if it doesn't exist
         self.setupUi(self)
 
         # Initialize DEVICE_ID as None initially
@@ -309,7 +313,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.read_timer.stop()  # Stop the timer
         
     def handle_save_start(self):
-        os.makedirs("data", exist_ok=True)  # Create the 'data' folder if it doesn't exist
         default_filename = os.path.join(
             "data", 
             f"{self.user_info["id"]}_{self.save_duration}_{time.strftime('%Y-%m-%d_%H-%M-%S')}.csv"
