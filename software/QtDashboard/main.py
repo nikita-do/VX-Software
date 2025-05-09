@@ -138,6 +138,8 @@ class DataProcessingThread(QThread):
         filtered_ppg_avg_list = highpass_filter(ppg_avg_list, cutoff=0.5, fs=SAMPLING_RATE)
         filtered_ecg_list = apply_notch_filter(ecg_list, fs=SAMPLING_RATE, notch_freq=60)
         filtered_ecg_list = apply_notch_filter(filtered_ecg_list, fs=SAMPLING_RATE, notch_freq=120)
+        # apply low-pass filter this way might cause batch boundary noise/discontinuities
+        # consider checking May 1st 2025 report slides
         filtered_ecg_list = lowpass_filter(filtered_ecg_list, cutoff=40, fs=SAMPLING_RATE)
         filtered_gsr_list = gsr_list
 
