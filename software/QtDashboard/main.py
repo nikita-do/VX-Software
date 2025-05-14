@@ -23,7 +23,7 @@ from mqtt_client import MqttClient
 from main_window import Ui_MainWindow  # This comes from the .ui converted file
 from dashboard import Ui_Form  # This comes from the .ui converted file
 
-from my_filter import highpass_filter, bandpass_filter, apply_notch_filter, wavelet_denoise , lowpass_filter # Import filter functions
+from my_filter import highpass_filter, bandpass_filter, apply_notch_filter, wavelet_denoise  # Import filter functions
 SAMPLING_RATE = 512  # Sampling rate in Hz (default: 512 Hz)
 SAMPLE_BATCH = 512  # Sample batch (default: 512 samples)
 MAX_PLOT_LENGTH = 5.5  # Maximum length of the plot in seconds
@@ -42,15 +42,18 @@ TOPIC_DEVICE_ATTR_FS = None
 TOPIC_DEVICE_ATTR_N = None
 TOPIC_DEVICE_DATA = None
 TOPIC_DEVICE_RESP_START = None
+TOPIC_DEVICE_RESP_RESET = None
 TOPIC_USER_CMD_START = f"host/{USER_ID}/commands/start"
 TOPIC_USER_CMD_SAVE = f"host/{USER_ID}/commands/save"
 TOPIC_USER_CMD_DURATION = f"host/{USER_ID}/commands/record_length"
+TOPIC_USER_CMD_RESET = f"host/{USER_ID}/commands/reset"
 TOPIC_USER_INFO = f"host/{USER_ID}/user_info"
 TOPIC_USER_SCREENSHOT = f"host/{USER_ID}/screenshot"  # Topic for screenshots
-TOPIC_USER_RESP_DURATION = f"host/{USER_ID}/responses/record_length" 
+TOPIC_USER_RESP_DURATION = f"host/{USER_ID}/responses/record_length"
 
 # MQTT Publish Topics
 TOPIC_DEVICE_CMD_START = None
+TOPIC_DEVICE_CMD_RESET = None
 TOPIC_HOST_STATUS = f"host/status_online"
 TOPIC_USER_DEVICE = f"host/{USER_ID}/device"
 TOPIC_USER_RESP_START = f"host/{USER_ID}/responses/start"
@@ -385,22 +388,26 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.label_device_name.setText(self.device_id)  # Update the UI
 
             # Update MQTT topics dynamically
-            global TOPIC_DEVICE_STATUS, TOPIC_DEVICE_DATA, TOPIC_DEVICE_RESP_START, TOPIC_DEVICE_CMD_START, TOPIC_DEVICE_ATTR_FS, TOPIC_DEVICE_ATTR_N
+            global TOPIC_DEVICE_STATUS, TOPIC_DEVICE_DATA, TOPIC_DEVICE_RESP_START, TOPIC_DEVICE_CMD_START, TOPIC_DEVICE_ATTR_FS, TOPIC_DEVICE_ATTR_N, TOPIC_DEVICE_CMD_RESET, TOPIC_DEVICE_RESP_RESET
             TOPIC_DEVICE_STATUS = f"device/{self.device_id}/status_online"
             TOPIC_DEVICE_ATTR_FS = f"device/{self.device_id}/attributes/sampling_rate" 
             TOPIC_DEVICE_ATTR_N = f"device/{self.device_id}/attributes/sample_batch" 
             TOPIC_DEVICE_DATA = f"device/{self.device_id}/data"
             TOPIC_DEVICE_RESP_START = f"device/{self.device_id}/responses/start"
+            TOPIC_DEVICE_RESP_RESET = f"device/{self.device_id}/responses/reset"
             TOPIC_DEVICE_CMD_START = f"device/{self.device_id}/commands/start"
+            TOPIC_DEVICE_CMD_RESET = f"device/{self.device_id}/commands/reset"
 
             # Resubscribe to updated topics
             updated_topics = [
                 (TOPIC_DEVICE_STATUS, 1),
                 (TOPIC_DEVICE_DATA, 2),
                 (TOPIC_DEVICE_RESP_START, 1),
+                (TOPIC_DEVICE_RESP_RESET, 1),
                 (TOPIC_USER_CMD_START, 1),
                 (TOPIC_USER_CMD_SAVE, 1),
                 (TOPIC_USER_CMD_DURATION, 1),
+                (TOPIC_USER_CMD_RESET, 1),
                 (TOPIC_USER_RESP_DURATION, 1),
                 (f"{TOPIC_USER_INFO}/#", 1),
                 (TOPIC_DEVICE_ATTR_FS, 1),
@@ -441,12 +448,20 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 self.button_save_start.click()
             elif payload.lower() == "false":
                 self.button_save_stop.click()
+        
+        elif topic == TOPIC_USER_CMD_RESET:
+            if payload.lower() == "true":
+                self.mqtt.publish_message(TOPIC_DEVICE_CMD_RESET, "true", qos = 1)  # Send command to the device
 
         elif topic == TOPIC_DEVICE_RESP_START:
             if payload.lower() == "true":
                 self.handle_read_start()
             elif payload.lower() == "false":
                 self.handle_read_stop()
+        
+        elif topic == TOPIC_DEVICE_RESP_RESET:
+            if payload.lower() == "true":
+                self.mqtt.publish_message(f"{TOPIC_USER_MSG}/status", "reset WiFi credentials...")
 
         elif topic == TOPIC_DEVICE_ATTR_FS:
             global SAMPLING_RATE
