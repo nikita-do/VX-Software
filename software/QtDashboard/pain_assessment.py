@@ -112,7 +112,7 @@ def preload_model():
         quit()
         #return None, None, None
 
-def predict(file_path):
+def predict(file_path, model, scaler, pca):
     features = extract_feature(file_path)
 
     if features.empty:
@@ -133,7 +133,7 @@ def main():
     root.withdraw()
     data_file_path = filedialog.askopenfilename(title="chose a csv file", filetypes=[("CSV files", "*.csv")])
 
-    pain_level = predict(data_file_path)
+    pain_level = predict(data_file_path, model, scaler, pca)
     print(f"predicted pain level: {pain_level}")
 
 if __name__ == '__main__':
