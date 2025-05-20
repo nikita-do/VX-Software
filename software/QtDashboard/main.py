@@ -139,12 +139,12 @@ class DataProcessingThread(QThread):
         ppg_avg_list = [-1 * (ir + red) / 2 for ir, red in zip(ir_list, red_list)]
 
         filtered_ppg_avg_list = highpass_filter(ppg_avg_list, cutoff=0.5, fs=SAMPLING_RATE)
-        filtered_ecg_list = apply_notch_filter(ecg_list, fs=SAMPLING_RATE, notch_freq=60)
-        filtered_ecg_list = apply_notch_filter(filtered_ecg_list, fs=SAMPLING_RATE, notch_freq=120)
-        # apply low-pass filter this way might cause batch boundary noise/discontinuities
-        # consider checking May 1st 2025 report slides
-        filtered_ecg_list = lowpass_filter(filtered_ecg_list, cutoff=40, fs=SAMPLING_RATE)
+        filtered_ecg_list = ecg_list
+        filtered_ecg_list = apply_notch_filter(filtered_ecg_list, fs=SAMPLING_RATE, notch_freq=60, Q=5)
+        filtered_ecg_list = apply_notch_filter(filtered_ecg_list, fs=SAMPLING_RATE, notch_freq=60*2, Q=5)
         filtered_gsr_list = gsr_list
+        filtered_gsr_list = apply_notch_filter(filtered_gsr_list, fs=SAMPLING_RATE, notch_freq=60, Q=5)
+        filtered_gsr_list = apply_notch_filter(filtered_gsr_list, fs=SAMPLING_RATE, notch_freq=60*2, Q=5)
 
         # Extend the series with the new data
         self.time_series.extend(time_list)
@@ -244,6 +244,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # Initialize save duration
         self.save_duration = None  # Save duration in seconds
         self.user_info = {}  # Dictionary to store user info
+        self.user_info['id'] = 0
 
         self.read_timer = QTimer()  # Timer to handle auto toggle of read_stop and read_start
         self.read_timer.timeout.connect(self._auto_toggle_read_buttons)
