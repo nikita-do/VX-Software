@@ -2,7 +2,7 @@ from scipy.signal import butter, filtfilt, iirnotch, lfilter
 import pywt
 import numpy as np
 
-def lowpass_filter(data, cutoff=0.5, fs=100, order=4):
+def lowpass_filter(data, cutoff=40, fs=100, order=4):
     b, a = butter(order, cutoff, btype='lowpass', fs=fs)
     return filtfilt(b, a, data)
 

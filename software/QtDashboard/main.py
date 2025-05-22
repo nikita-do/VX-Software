@@ -24,6 +24,7 @@ from main_window import Ui_MainWindow  # This comes from the .ui converted file
 from dashboard import Ui_Form  # This comes from the .ui converted file
 
 from my_filter import highpass_filter, bandpass_filter, apply_notch_filter, wavelet_denoise  # Import filter functions
+from pain_assessment import PainAssessor
 SAMPLING_RATE = 512  # Sampling rate in Hz (default: 512 Hz)
 SAMPLE_BATCH = 512  # Sample batch (default: 512 samples)
 MAX_PLOT_LENGTH = 5.5  # Maximum length of the plot in seconds
@@ -242,13 +243,30 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.button_waveform.clicked.connect(self._toggle_dashboard_visibility)
 
         # Initialize save duration
-        self.save_duration = None  # Save duration in seconds
+        self.save_duration = 30 # Save duration in seconds
         self.user_info = {}  # Dictionary to store user info
         self.user_info['id'] = 0
 
         self.read_timer = QTimer()  # Timer to handle auto toggle of read_stop and read_start
         self.read_timer.timeout.connect(self._auto_toggle_read_buttons)
         self.read_elapsed_time = 0  # Track elapsed time since read_start
+
+        self.predict_timer = QTimer()
+        self.predict_timer.timeout.connect(self._pain_prediction)
+
+        self.pain_assessor = PainAssessor()
+
+    def _pain_prediction(self):
+        # region of interest = 5.5 seconds of samples
+        roi = int(SAMPLING_RATE * 5.5)
+        gsr_list  = list(self.data_thread.gsr_series)
+        ecg_list  = list(self.data_thread.ecg_series)
+        time_list = list(self.data_thread.time_series)
+        pain_level = self.pain_assessor.predict_from_raw(ecg_list[-roi:], gsr_list[-roi:], time_list[-roi:])
+        if pain_level != None:
+            print('Predicted pain level: {}'.format(pain_level))
+        else:
+            print('No emotion')
 
     def _initialize_dashboard_graphs(self):
         """Initialize graphs in the dashboard window."""
@@ -306,6 +324,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.data_thread.__init__(self.ecg_curve, self.ppg_curve, self.gsr_curve, self.data_logger) # Reinitialize the data processing thread
         self.button_save_start.setEnabled(True)  # Enable save button
         self.read_timer.start(1000)  # Check every second
+        self.predict_timer.start(6000)
 
     def handle_read_stop(self):
         self.mqtt.publish_message(TOPIC_USER_RESP_START, "false", retain=True)  
@@ -317,6 +336,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # self.data_thread.signal_reset_series.emit()  # Signal to reset all series values
         self.button_save_stop.click()
         self.read_timer.stop()  # Stop the timer
+        self.predict_timer.stop()
         
     def handle_save_start(self):
         default_filename = os.path.join(
@@ -527,6 +547,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.read_timer.stop()
         self.message_timer.stop()
         self.message_queue.clear()  # Clear any remaining messages
+        self.predict_timer.stop()
 
         super().closeEvent(event)
 
