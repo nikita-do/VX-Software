@@ -11,7 +11,6 @@ kiwisolver==1.4.8
 matplotlib==3.10.3
 neurokit2==0.2.11
 numpy==1.26.4
-nvidia-nccl-cu12==2.26.5
 packaging==25.0
 paho-mqtt==2.1.0
 pandas==2.2.3
