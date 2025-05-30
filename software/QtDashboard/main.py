@@ -413,8 +413,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         
         if topic == "device":
             # Receive device_id from the "device" topic
-            # self.device_id = payload.strip()  # Update device_id
-            self.device_id = 'VX_CEA36A'
+            self.device_id = payload.strip()  # Update device_id
+            # self.device_id = 'VX_CEA36A' # For testing purposes only, hardcode the device_id
             self.label_device_name.setText(self.device_id)  # Update the UI
 
             # Update MQTT topics dynamically
