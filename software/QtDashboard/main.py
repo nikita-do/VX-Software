@@ -13,6 +13,7 @@ import base64  # Import base64 for encoding image
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QWidget
 from PyQt6.QtCore import pyqtSlot, QTimer, QThread, pyqtSignal
+from PyQt6.QtGui import QFont  # Import QFont for setting font
 import pyqtgraph as pg
 import numpy as np
 import time
@@ -63,6 +64,7 @@ TOPIC_USER_MSG = f"host/{USER_ID}/message"
 
 class DataProcessingThread(QThread):
     signal_status_msg = pyqtSignal(str)
+    signal_prediction = pyqtSignal(int)  # Signal to emit pain prediction results
     # signal_reset_series = pyqtSignal()  # Signal to reset all series values
 
     def __init__(self, ecg_curve, ppg_curve, gsr_curve, data_logger):
@@ -75,43 +77,36 @@ class DataProcessingThread(QThread):
         self.gsr_curve = gsr_curve
         self.data_logger = data_logger  # Pass the DataLogger instance
         
-        maxlen = round(SAMPLE_BATCH * MAX_PLOT_LENGTH)  # Maximum length for deque, rounded to the nearest integer
-        self.time_series = deque([0], maxlen)  # Time series for plotting
-        self.ir_series = deque([0], maxlen)  # IR channel series
-        self.red_series = deque([0], maxlen)
-        self.ecg_series = deque([0], maxlen)  # ECG series
-        self.gsr_series = deque([0], maxlen)  # GSR series
-        self.ppg_series = deque([0], maxlen)  # PPG series
+        self.maxlen = round(SAMPLE_BATCH * MAX_PLOT_LENGTH)  # Maximum length for deque, rounded to the nearest integer
+        self.time_series = deque([0], self.maxlen)  # Time series for plotting
+        self.ir_series = deque([0], self.maxlen)  # IR channel series
+        self.red_series = deque([0], self.maxlen)
+        self.ecg_series = deque([0], self.maxlen)  # ECG series
+        self.gsr_series = deque([0], self.maxlen)  # GSR series
+        self.ppg_series = deque([0], self.maxlen)  # PPG series
 
         # self.signal_reset_series.emit()  # Emit signal to reset series during initialization
+        self.pain_assessor = PainAssessor()
 
-    def run(self):
-        while self.running:
-            if not self.data_queue.empty():
-                data = self.data_queue.get()  # Thread-safe access
-                self.process_and_plot_data(data)
+    def add_data(self, data):
+        self.data_queue.put(data)  # Thread-safe addition
 
-    def process_and_plot_data(self, data):
-        # Extract sensor data from the JSON message
-        time_list = data.get("time", [])
-        ir_list = data.get("ir", [])
-        red_list = data.get("red", [])
-        ecg_list = data.get("ecg", [])
-        gsr_list = data.get("gsr", [])
+    def stop(self):
+        self.running = False
+        self.wait()
 
-        # Ensure they are lists and have the same length
-        if not all(isinstance(lst, list) for lst in [time_list, ir_list, red_list, ecg_list, gsr_list]) or \
-           not all(len(lst) == len(time_list) for lst in [ir_list, red_list, ecg_list, gsr_list]):
-            self.signal_status_msg.emit("❌ Invalid or mismatched data format.")
-            return
+    def _pain_prediction(self):
+        # region of interest = 5.5 seconds of samples
+        roi = int(SAMPLING_RATE * 5.5)
+        gsr_list  = list(self.gsr_series)
+        ecg_list  = list(self.ecg_series)
+        time_list = list(self.time_series)
 
-        # Check if the first element of the time list is not larger than the last element in the time_series
-        if time_list[0] <= self.time_series[-1]:
-            self._plot_missing_data(time_list)
-            print("❌ Error: Time series is not in ascending order. Data not added.")
-        else:
-            self._process_valid_data(time_list, ir_list, red_list, ecg_list, gsr_list)
-
+        # Predict pain level using the PainAssessor
+        pain_level = self.pain_assessor.predict_from_raw(ecg_list[-roi:], gsr_list[-roi:], time_list[-roi:])
+        # Emit the predicted pain level
+        self.signal_prediction.emit(pain_level)
+        print(f"[DEBUG] Predicted pain level emitted: {pain_level}")
 
     def _plot_missing_data(self, time_list):
         # Plot missing data with placeholder values
@@ -123,17 +118,17 @@ class DataProcessingThread(QThread):
             np.concatenate([np.array(self.time_series), np.array(extended_time)]),
             np.concatenate([np.array(self.ecg_series), np.array(placeholder_data)]),
             pen='k'
-)
+        )
         self.ppg_curve.setData(
             np.concatenate([np.array(self.time_series), np.array(extended_time)]),
             np.concatenate([np.array(self.ppg_series), np.array(placeholder_data)]),
             pen='k'
-)
+        )
         self.gsr_curve.setData(
             np.concatenate([np.array(self.time_series), np.array(extended_time)]),
             np.concatenate([np.array(self.gsr_series), np.array(placeholder_data)]),
             pen='k'
-)
+        )
 
     def _process_valid_data(self, time_list, ir_list, red_list, ecg_list, gsr_list):
         # Compute PPG Avg and apply filters
@@ -163,6 +158,11 @@ class DataProcessingThread(QThread):
         self.ppg_curve.setData(time_in_ms, np.array(self.ppg_series), pen='b')
         self.gsr_curve.setData(time_in_ms, np.array(self.gsr_series), pen='m')
 
+        # Predict and log data to csv for every 5.5s length of data
+        if len(self.ecg_series) >= self.maxlen:
+            # Start prediction Pain Assessor
+            self._pain_prediction()
+
         # Log data to CSV if logging is active
         if self.data_logger.is_logging:
             self.data_logger.write_batch_to_csv(
@@ -170,12 +170,32 @@ class DataProcessingThread(QThread):
                 ir_list, red_list, filtered_ppg_avg_list
             )
 
-    def add_data(self, data):
-        self.data_queue.put(data)  # Thread-safe addition
+    def process_and_plot_data(self, data):
+        # Extract sensor data from the JSON message
+        time_list = data.get("time", [])
+        ir_list = data.get("ir", [])
+        red_list = data.get("red", [])
+        ecg_list = data.get("ecg", [])
+        gsr_list = data.get("gsr", [])
 
-    def stop(self):
-        self.running = False
-        self.wait()
+        # Ensure they are lists and have the same length
+        if not all(isinstance(lst, list) for lst in [time_list, ir_list, red_list, ecg_list, gsr_list]) or \
+           not all(len(lst) == len(time_list) for lst in [ir_list, red_list, ecg_list, gsr_list]):
+            self.signal_status_msg.emit("❌ Invalid or mismatched data format.")
+            return
+
+        # Check if the first element of the time list is not larger than the last element in the time_series
+        if time_list[0] <= self.time_series[-1]:
+            self._plot_missing_data(time_list)
+            print("❌ Error: Time series is not in ascending order. Data not added.")
+        else:
+            self._process_valid_data(time_list, ir_list, red_list, ecg_list, gsr_list)
+
+    def run(self):
+        while self.running:
+            if not self.data_queue.empty():
+                data = self.data_queue.get()  # Thread-safe access
+                self.process_and_plot_data(data)
 
 class MainWindow(QMainWindow, Ui_MainWindow):
     def __init__(self):
@@ -210,6 +230,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.dashboard_ui = Ui_Form()
         self.dashboard_ui.setupUi(self.dashboard_window)
         self._initialize_dashboard_graphs()
+
+        # Set the font size for the text_receivedPayload
+        self.text_receivedPayload.setFont(QFont('Arial', 16))  # Set font for the text area
 
         # Initialize data processing thread
         self.data_thread = DataProcessingThread(self.ecg_curve, self.ppg_curve, self.gsr_curve, self.data_logger)
@@ -250,23 +273,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.read_timer = QTimer()  # Timer to handle auto toggle of read_stop and read_start
         self.read_timer.timeout.connect(self._auto_toggle_read_buttons)
         self.read_elapsed_time = 0  # Track elapsed time since read_start
-
-        self.predict_timer = QTimer()
-        self.predict_timer.timeout.connect(self._pain_prediction)
-
-        self.pain_assessor = PainAssessor()
-
-    def _pain_prediction(self):
-        # region of interest = 5.5 seconds of samples
-        roi = int(SAMPLING_RATE * 5.5)
-        gsr_list  = list(self.data_thread.gsr_series)
-        ecg_list  = list(self.data_thread.ecg_series)
-        time_list = list(self.data_thread.time_series)
-        pain_level = self.pain_assessor.predict_from_raw(ecg_list[-roi:], gsr_list[-roi:], time_list[-roi:])
-        if pain_level != None:
-            print('Predicted pain level: {}'.format(pain_level))
-        else:
-            print('No emotion')
 
     def _initialize_dashboard_graphs(self):
         """Initialize graphs in the dashboard window."""
@@ -322,9 +328,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.button_read_stop.setEnabled(True)  # Enable stop button
         self.button_read_start.setEnabled(False)  # Disable start button
         self.data_thread.__init__(self.ecg_curve, self.ppg_curve, self.gsr_curve, self.data_logger) # Reinitialize the data processing thread
+        # Connect the data processing thread to the data logger
+        # @TODO: This should be done in the constructor of DataProcessingThread
+        self.data_thread.signal_prediction.connect(self.on_prediction_result)
         self.button_save_start.setEnabled(True)  # Enable save button
         self.read_timer.start(1000)  # Check every second
-        self.predict_timer.start(6000)
 
     def handle_read_stop(self):
         self.mqtt.publish_message(TOPIC_USER_RESP_START, "false", retain=True)  
@@ -336,12 +344,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # self.data_thread.signal_reset_series.emit()  # Signal to reset all series values
         self.button_save_stop.click()
         self.read_timer.stop()  # Stop the timer
-        self.predict_timer.stop()
         
     def handle_save_start(self):
         default_filename = os.path.join(
             "data", 
-            f"{self.user_info["id"]}_{self.save_duration}_{time.strftime('%Y-%m-%d_%H-%M-%S')}.csv"
+            f"{self.user_info['id']}_{self.save_duration}_{time.strftime('%Y-%m-%d_%H-%M-%S')}.csv"
         )
         print(f"🧾 User Info: {self.user_info}")
         self.data_logger.start_logging(default_filename, self.user_info)  # Start logging to the selected file
@@ -391,21 +398,23 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     # --------------- MQTT Signal Handler ---------------
     @pyqtSlot(str, str)
     def handle_mqtt_msg(self, topic, payload):  # Update the received payload in the UI
+        # @TODO: This should be printed to the console for debug, not UI
         # Get current timestamp
-        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+        # timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
 
-        # Format the log line with timestamp
-        log_line = f"[{timestamp}] Topic: {topic}\nPayload: {payload}\n"
+        # # Format the log line with timestamp
+        # log_line = f"[{timestamp}] Topic: {topic}\nPayload: {payload}\n"
 
-        # Append to UI
-        self.text_receivedPayload.appendPlainText(log_line)
-        self.text_receivedPayload.verticalScrollBar().setValue(
-            self.text_receivedPayload.verticalScrollBar().maximum()
-        )
+        # # Append to UI
+        # self.text_receivedPayload.appendPlainText(log_line)
+        # self.text_receivedPayload.verticalScrollBar().setValue(
+        #     self.text_receivedPayload.verticalScrollBar().maximum()
+        # )
         
         if topic == "device":
             # Receive device_id from the "device" topic
-            self.device_id = payload.strip()  # Update device_id
+            # self.device_id = payload.strip()  # Update device_id
+            self.device_id = 'VX_CEA36A'
             self.label_device_name.setText(self.device_id)  # Update the UI
 
             # Update MQTT topics dynamically
@@ -530,6 +539,26 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # Show temporary message in the status bar for 1 second
         self.statusBar().showMessage(message)
         QTimer.singleShot(1000, lambda: self.statusBar().clearMessage())
+    
+    @pyqtSlot(int)
+    def on_prediction_result(self, pain_level):
+        """Handle the prediction result from the data processing thread."""
+
+        # Get current timestamp
+        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+
+        print('[DEBUG] on_prediction_result called with pain_level:', pain_level)
+
+        if pain_level != None:
+            print('Predicted pain level: {}'.format(pain_level))
+            self.text_receivedPayload.appendPlainText('[{}] Predicted pain level: {}'.format(timestamp, pain_level))
+        else:
+            print('Pain level not predictable')
+            self.text_receivedPayload.appendPlainText('[{}] Pain level not predictable'.format(timestamp))
+
+        self.text_receivedPayload.verticalScrollBar().setValue(
+            self.text_receivedPayload.verticalScrollBar().maximum()
+        )
 
     def closeEvent(self, event):
         """Ensure all resources are cleaned up on close."""
@@ -547,7 +576,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.read_timer.stop()
         self.message_timer.stop()
         self.message_queue.clear()  # Clear any remaining messages
-        self.predict_timer.stop()
 
         super().closeEvent(event)
 

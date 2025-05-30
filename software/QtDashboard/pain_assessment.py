@@ -1,7 +1,5 @@
 import pandas as pd
 import joblib
-import tkinter as tk
-from tkinter import filedialog
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report
 import os
@@ -15,14 +13,15 @@ from scipy.stats import skew, kurtosis
 # Run this file seperately for testing:
 #   python pain_assessment.py 
 #
-# Usage example in main() 
+# Usage example in main()
 
 class PainAssessor:
     def __init__(self):
         try:
-            self.model = joblib.load("pain_votingclassifier_J.pkl")
-            self.scaler = joblib.load("scaler.pkl")
-            self.pca = joblib.load("pca.pkl")
+            self.resources_dir = "/home/bme662/vital-X/resources/"
+            self.model = joblib.load(self.resources_dir + "pain_votingclassifier_J.pkl")
+            self.scaler = joblib.load(self.resources_dir + "scaler.pkl")
+            self.pca = joblib.load(self.resources_dir + "pca.pkl")
         except FileNotFoundError as e:
             print('Some of these files are missing: pain_votingclassifier_J.pkl, scaler.pkl, pca.pkl')
             print('Please ensure that all of these files are present in this directory')
@@ -92,10 +91,11 @@ class PainAssessor:
                 elif num_peaks >= 2:
                     gsr_amp = neurokit['SCR_Amplitude'][-1]
                     gsr_max = gsr_phasic[gsr_max_indices[-1]]
+                else:
+                    print("[DEBUG]  No GSR Peak detected!")
             except Exception as e:
                 print(f"gsr peaks error: {e}")
                 return None
-
 
             feature_row = pd.DataFrame([{
                 'gsr_amp': gsr_amp,
@@ -117,7 +117,7 @@ class PainAssessor:
             return feature_row
 
         except Exception as e:
-            print(f"feature extraction error from file {file_path}: {e}")
+            print(f"feature extraction error: {e}")
             return pd.DataFrame()
 
     def predict_from_file(self, file_path):
@@ -131,27 +131,28 @@ class PainAssessor:
     def predict_from_raw(self, ecg, gsr, time):
         try:
             features = self.extract_feature(ecg, gsr, time)
+            if isinstance(features, pd.DataFrame): # @TODO: fix checking condition
+                print(f"[DEBUG] {features.to_string()}")
+                return self.predict(features)
+            else:
+                print('Missing feature(s)')
+                return None
         except Exception as e:
             print(e)
             return None
-        return self.predict(features)
 
     def predict(self, features):
-        if isinstance(features, pd.DataFrame):
-            features_scaled = self.scaler.transform(features)
-            features_pca = self.pca.transform(features_scaled)
+        features_scaled = self.scaler.transform(features)
+        features_pca = self.pca.transform(features_scaled)
 
-            predicted_label = self.model.predict(features_pca)
-            return predicted_label[0]
-        else:
-            print('Missing feature(s)')
-            return None
+        predicted_label = self.model.predict(features_pca)
+        return predicted_label[0]
 
     def _up_sampling_all(self, time, gsr, ecg, ppg, current_fs, up_fs):
         upSamplingRateFactor = up_fs / current_fs
         roi_samples = int(current_fs * self.roi_length)                
 
-        new_time = newTime = np.linspace(0, roi_length * 1000, roi_samples * upSamplingRateFactor)
+        new_time = newTime = np.linspace(0, self.roi_length * 1000, roi_samples * upSamplingRateFactor)
         new_gsr = self.up_sampling(gsr, roi_samples, upSamplingRateFactor)
         new_ecg = self.up_sampling(ecg, roi_samples, upSamplingRateFactor)
         new_ppg = self.up_sampling(ppg, roi_samples, upSamplingRateFactor)
@@ -166,18 +167,14 @@ class PainAssessor:
         roi_samples = int(fs * self.roi_length)                
         return data[0:roi_samples]
 
+# if __name__ == '__main__':
+#     pain_assessor = PainAssessor()
 
-if __name__ == '__main__':
-    pain_assessor = PainAssessor()
+#     data_file_path = 'data/0_30_2025-05-21_11-36-56.csv'
 
-    #root = tk.Tk()
-    #root.withdraw()
-    #data_file_path = filedialog.askopenfilename(title="chose a csv file", filetypes=[("CSV files", "*.csv")])
-    data_file_path = 'data/0_30_2025-05-21_11-36-56.csv'
-
-    pain_level = pain_assessor.predict_from_file(data_file_path)
-    if pain_level != None:
-        print(f"predicted pain level: {pain_level}")
-    else:
-        print("No emotion")
+#     pain_level = pain_assessor.predict_from_file(data_file_path)
+#     if pain_level != None:
+#         print(f"predicted pain level: {pain_level}")
+#     else:
+#         print("No emotion")
 
