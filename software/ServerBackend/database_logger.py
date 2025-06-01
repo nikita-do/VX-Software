@@ -22,6 +22,20 @@ class DatabaseLogger(threading.Thread):
         self.org = org
         self.processor = data_processor
 
+    # def _log_to_influxdb(self, data):
+    #     try:
+    #         point = (
+    #             Point("sensor_prediction")
+    #             .tag("sensor", data["sensor"])
+    #             .field("prediction", float(data["prediction"]))
+    #             .field("samples", data["num_samples"])
+    #             .time(data["timestamp"])
+    #         )
+    #         self.write_api.write(bucket=self.influx_bucket, record=point)
+    #         print(f"[InfluxDBLogger] Logged prediction for {data['sensor']}")
+    #     except Exception as e:
+    #         print(f"[InfluxDBLogger] Error: {e}")
+
     def run(self):
         print("[DatabaseLogger] Thread started.")
         while self.running:

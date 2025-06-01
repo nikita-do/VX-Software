@@ -4,26 +4,26 @@ from mqtt_subscriber import MQTTSubscriber
 from data_processor import DataProcessor
 from database_logger import DatabaseLogger
 
-# MQTT and InfluxDB Configuration
+# MQTT and Database Configuration
 MQTT_CONFIG = {
     "broker": os.getenv("MQTT_BROKER", "700be638167b43289186dff783367cc3.s1.eu.hivemq.cloud"),
     "port": int(os.getenv("MQTT_PORT", 8883)),
     "username": os.getenv("MQTT_USERNAME", "ngocdo"),
     "password": os.getenv("MQTT_PASSWORD", "Ng19102002"),
-    "certificate": "resources\server.pem"
+    "certificate": "/home/bme662/vital-X/resources/server.pem"
 }
 
 INFLUX_CONFIG = {
     "url": "http://localhost:8086",
-    "token": "your-token-here",
-    "org": "my-org",
-    "bucket": "sensor_data"
+    "token": os.getenv("INFLUXDB_TOKEN", "TuUAJAXc9vwWcwG-W690wjEyRg3DiOlQ-54I5EVSPcCAPL5gm2dIkqhAQnT3RZ6jY_heDkpfySPFCxUHFoWCcw=="),
+    "org": "BME662",
+    "bucket": "bme662-db"
 }
 
 PROCESSOR_CONFIG = {
-    "model_path": "resources\pain_votingclassifier_J.pkl",
-    "scaler_path": "resources\scaler.pkl",
-    "pca_path": "resources\pca.pkl"
+    "model_path": "/home/bme662/vital-X/resources/pain_votingclassifier_J.pkl",
+    "scaler_path": "/home/bme662/vital-X/resources/scaler.pkl",
+    "pca_path": "/home/bme662/vital-X/resources/pca.pkl"
 }
 
 class MainServer:
