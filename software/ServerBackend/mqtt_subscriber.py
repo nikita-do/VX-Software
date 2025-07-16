@@ -1,7 +1,7 @@
 import cbor2
 import json
-import time
-from enum import Enum
+import threading
+import queue
 import paho.mqtt.client as mqtt
 
 MQTT_CLIENT_ID = "BME_SERVER"
@@ -15,27 +15,38 @@ MQTT_TOPICS = {
     "TOPIC_DEVICE_RESP_RESET": (f"device/$$$/responses/reset", 1),  # Device response reset topic
     "TOPIC_DEVICE_CMD_START": (f"device/$$$/commands/start", 1),  # Device command start topic
     "TOPIC_DEVICE_CMD_RESET": (f"device/$$$/commands/reset", 1),  # Device command reset topic
-    "TOPIC_DEVICE_DATA": (f"device/$$$/data", 1)  # Device data topic
+    "TOPIC_DEVICE_DATA": (f"device/$$$/data", 1),  # Device data topic
+    
+    "TOPIC_CLIENT_INFO": (f"backend/client/$$$/info", 1),  # Client user info topic
+    
+    "TOPIC_CLIENT_INFO_ID": (f"backend/client/$$$/info/id", 1),  # Client user ID topic
+    "TOPIC_CLIENT_INFO_AGE": (f"backend/client/$$$/info/age", 1),  # Client user age topic
+    "TOPIC_CLIENT_INFO_GENDER": (f"backend/client/$$$/info/gender", 1), # Client user gender topic
+    "TOPIC_CLIENT_INFO_WEIGHT": (f"backend/client/$$$/info/weight", 1),  # Client user weight topic
+    "TOPIC_CLIENT_INFO_HEIGHT": (f"backend/client/$$$/info/height", 1),  # Client user height topic
+    
 }
 
-class MQTTSubscriber:
-    def __init__(self, broker, port, username, password, certificate, data_queue):
+class MQTTSubscriber():
+    def __init__(self, broker, port, username, password, certificate):
+        self._lock = threading.Lock()
+
         self.broker = broker
         self.port = port
         self.username = username
         self.password = password
         self.certificate = certificate
-        self.data_queue = data_queue # Connected Queue for data processing
+        self.packet_queue = queue.Queue(maxsize=100)
 
-        self.subcribed_device_id = "$$$" # Store the subscribed device ID from "device" topic
-        self.device_status = False  # Track the device status (online/offline)
-        self.device_sampling_rate = 0  # Track the device sampling rate
-        self.device_sample_batch = 0  # Track the device sample batch
-        self.device_measureing = False  # Track if the device is currently measuring
+        self.subcribed_device_id = "$$$" # subscribed device ID from "device" topic
+        self.sampling_rate = None
+        self.batch_size = None
+        self.measuring = False
+        self.online = False
+        self.user_info = {}  # Store user info as a dictionary
 
         # Initialize the MQTT client
         self.client = mqtt.Client()
-
         # Set the credentials and TLS settings
         self.client.username_pw_set(username, password)
         if certificate:
@@ -56,7 +67,8 @@ class MQTTSubscriber:
         # Check if a device ID is provided, and subscribe to the topics accordingly
         if self.subcribed_device_id != "$$$":
             for topic, qos in MQTT_TOPICS.values():
-                self.subscribe_to_topic(topic, qos)
+                self.client.subscribe(topic)
+                print(f"[MQTT] Subscribed to topic: <{topic}> with QoS {qos}")
         else:
             # If no device ID is provided, subscribe to the "device" topic
             self.client.subscribe(MQTT_TOPICS["TOPIC_DEVICE"])
@@ -76,70 +88,95 @@ class MQTTSubscriber:
 
                 # Only update topics if the device ID is updated
                 if self.subcribed_device_id != device_id:
-                    self.subcribed_device_id = device_id
+                    with self._lock:
+                        # Update the subscribed device ID
+                        self.subcribed_device_id = device_id
+                    
                     print(f"[MQTT] New device ID received: {self.subcribed_device_id}")
+
                     # Update the topics with the new device ID
                     self.update_topics(self.subcribed_device_id)
-                    # Subscribe to all other topics with the updated device ID
                     for topic, qos in MQTT_TOPICS.values():
-                        self.subscribe_to_topic(topic, qos)
+                        self.client.subscribe(topic)
+                        print(f"[MQTT] Subscribed to topic: <{topic}> with QoS {qos}")
                 return
+            
             # -> topic /device/<device_ID>/status_online
             elif topic == MQTT_TOPICS["TOPIC_DEVICE_STATUS"][0]:
-                # Get the device status from the payload
                 device_status = payload.decode('utf-8')
-                # Update the device status based on the payload
+                is_online = None
+
                 if device_status == "true":
                     print("[MQTT] Device is online")
-                    self.device_status = True
+                    is_online = True
                 elif device_status == "false":
                     print("[MQTT] Device is offline")
-                    self.device_status = False
+                    is_online = False
                 else:
-                    print(f"[MQTT] Device Unknown status: {self.device_status}")
+                    print(f"[MQTT] Device Unknown status: {device_status}")
+
+                with self._lock:
+                    self.online = is_online
                 return
+            
             # -> topic /device/<device_ID>/attributes/sampling_rate
             elif topic == MQTT_TOPICS["TOPIC_DEVICE_ATTR_FS"][0]:
-                self.device_sampling_rate = int(payload.decode("utf-8"))
-                print(f"[MQTT] Device sampling rate: {self.device_sampling_rate} Hz")
+                sampling_rate = int(payload.decode("utf-8"))
+                print(f"[MQTT] Device sampling rate: {sampling_rate} Hz")
+
+                with self._lock:
+                    self.sampling_rate = sampling_rate
                 return
+            
             # -> topic /device/<device_ID>/attributes/sample_batch
             elif topic == MQTT_TOPICS["TOPIC_DEVICE_ATTR_N"][0]:
-                self.device_sample_batch = int(payload.decode("utf-8"))
-                print(f"[MQTT] Device sample batch: {self.device_sample_batch} samples")
+                sample_batch = int(payload.decode("utf-8"))
+                print(f"[MQTT] Device sample batch: {sample_batch} samples")
+
+                with self._lock:
+                    self.batch_size = sample_batch
                 return
+            
             # -> topic /device/<device_ID>/data
             elif topic == MQTT_TOPICS["TOPIC_DEVICE_DATA"][0]:
-                # Decode the payload as CBOR
-                decoded_data = cbor2.loads(msg.payload)
-                # Decode the payload as Compact JSON
+                decoded_data = cbor2.loads(payload)
                 serialized_data = json.dumps(decoded_data, separators=(',', ':'))
-                # Deserialize data to a Python object
                 data = json.loads(serialized_data)
-                # Check data validity
+
                 if isinstance(data, dict):
-                    # self.data_thread.add_data(data)
-                    # @TODO: transfer data to processor queue
                     print(f"[MQTT] Validated data with length: {len(data)}")
-                    self.data_queue.put(data)
+                    self.packet_queue.put(data)
                 else:
                     raise ValueError("[MQTT] Invalid data. Expected a dictionary.")
                 return
+            
             # -> topic /device/<device_ID>/responses/start
             elif topic == MQTT_TOPICS["TOPIC_DEVICE_RESP_START"][0]:
-                # Get the measurement start response
-                device_measure_status = msg.payload.decode("utf-8")
-                # Update the device measuring status based on the response
+                device_measure_status = payload.decode("utf-8")
+                is_measuring = None
+
                 if device_measure_status == "true":
-                    self.device_measureing = True
                     print("[MQTT] Device is now measuring")
+                    is_measuring = True
                 elif device_measure_status == "false":
-                    self.device_measureing = False
                     print("[MQTT] Device has stopped measuring")
+                    is_measuring = False
                 else:
                     print(f"[MQTT] Device measure status unknown: {device_measure_status}")
+
+                with self._lock:
+                    self.measuring = is_measuring
                 return
-            # -> Handle unknown topics
+            
+            elif topic.startswith(MQTT_TOPICS["TOPIC_CLIENT_INFO"][0]):
+                # Handle client user info topics
+                user_info_key = topic.split("/")[-1]  # Get the last part of the topic
+                user_info_value = payload.decode("utf-8")
+                print(f"[MQTT] User info received: {user_info_key} = {user_info_value}")
+                with self._lock:
+                    self.user_info[user_info_key] = user_info_value
+                return
+
             else:
                 print(f"[MQTT] Received message on unknown topic: {topic}")
                 return
@@ -149,7 +186,6 @@ class MQTTSubscriber:
 
     def start(self):
         """Connect to the MQTT broker and start the loop."""
-
         self.client.connect(self.broker, self.port)
         self.client.loop_start()
         # @TODO: Consider loop forever to keep the client running
@@ -157,16 +193,9 @@ class MQTTSubscriber:
     
     def stop(self):
         """Stop the MQTT client loop and disconnect."""
-
         self.client.loop_stop()
         self.client.disconnect()
         print("[MQTT] Disconnected from broker")
-
-    def subscribe_to_topic(self, topic, qos=0):
-        """Subscribe to a specific topic."""
-
-        self.client.subscribe(topic)
-        print(f"[MQTT] Subscribed to topic: <{topic}> with QoS {qos}")
 
     def update_topics(self, device_id):
         """Update the MQTT topics based on the new device ID."""
@@ -176,3 +205,31 @@ class MQTTSubscriber:
             if "device" in topic:
                 MQTT_TOPICS[key] = (topic.replace("$$$", device_id), qos)
         print(f"[MQTT] Updated topics for device ID: {self.subcribed_device_id}")
+    
+    def get_output_queue(self) -> dict:
+        """Return the data for processing."""
+        return self.packet_queue.get()
+    
+    def get_sampling_rate(self) -> int:
+        with self._lock:
+            return self.sampling_rate
+
+    def get_batch_size(self) -> int:
+        with self._lock:
+            return self.batch_size
+
+    def get_device_id(self) -> str:
+        with self._lock:
+            return self.subcribed_device_id
+
+    def is_device_online(self) -> bool:
+        with self._lock:
+            return self.online
+        
+    def is_device_measuring(self) -> bool:
+        with self._lock:
+            return self.measuring
+        
+    def get_user_info(self) -> dict:
+        with self._lock:
+            return self.user_info
