@@ -60,6 +60,7 @@ class PacketProcessor(threading.Thread):
         """
 
         packet_id = data.get("id", None)
+        timestamp = data.get("t", None)
         ir_list = data.get("ir", [])
         red_list = data.get("red", [])
         ecg_list = data.get("ecg", [])
@@ -71,6 +72,10 @@ class PacketProcessor(threading.Thread):
 
         if not all(isinstance(lst, list) for lst in [ir_list, red_list, ecg_list, gsr_list]):
             print("[PacketProcessor] Invalid data format. One or more signals are not lists.")
+            return None
+        
+        if not isinstance(timestamp, int):
+            print(f"[PacketProcessor] Invalid timestamp type: {type(timestamp)}. Expected int.")
             return None
 
         # Check that all signals have the same length
@@ -105,9 +110,9 @@ class PacketProcessor(threading.Thread):
             gsr_list = gsr_list[:expected_length]
 
         # At this point all signals are the same length = expected_length
-        print(f"[PacketProcessor] Packet {packet_id} passed validation with {expected_length} samples.")
         return {
             "id": packet_id,
+            "t": timestamp,
             "ir": ir_list,
             "red": red_list,
             "ecg": ecg_list,
@@ -151,11 +156,9 @@ class PacketProcessor(threading.Thread):
     def get_output_queue(self) -> dict:
         """ Returns the output queue for processed data. """
         return self.data_queue.get()
-    
-    def get_sampling_rate(self) -> int:
-        """ Returns the sampling rate for this processor. """
-        sampling_rate = self.subscriber.get_sampling_rate()
-        return sampling_rate
 
     def stop(self):
         self.running = False
+        # clear the queue
+        while not self.data_queue.empty():
+            self.data_queue.get_nowait()

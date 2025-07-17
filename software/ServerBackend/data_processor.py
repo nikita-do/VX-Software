@@ -4,15 +4,17 @@ import queue
 from collections import defaultdict, deque
 from pain_assessor import PainAssessor
 from packet_processor import PacketProcessor
+from mqtt_subscriber import MQTTSubscriber
 from data_processor_filters import lowpass_filter, highpass_filter, bandpass_filter, apply_notch_filter, wavelet_denoise
 
 class DataProcessor(threading.Thread):
-    def __init__(self, model_path, scaler_path, pca_path, data_provider: PacketProcessor, prediction_window_sec=5):
+    def __init__(self, model_path, scaler_path, pca_path, data_provider: PacketProcessor, config_provider: MQTTSubscriber, prediction_window_sec=5):
         """ Initializes the DataProcessor thread. """
         super().__init__(daemon=True)
 
         self.pain_assessor = PainAssessor(model_path, scaler_path, pca_path, prediction_window_sec)
         self.provider = data_provider
+        self.subscriber = config_provider
         self.window_sec = prediction_window_sec
 
         self.lock = threading.Lock()
@@ -34,33 +36,32 @@ class DataProcessor(threading.Thread):
                 # Get the next data packet from the data provider
                 # This will block until data is available
                 data_packet = self.provider.get_output_queue()
-                sampling_rate = self.provider.get_sampling_rate()
+                sampling_rate = self.subscriber.get_sampling_rate()
+                location_code = self.subscriber.get_location()
                 window_size = round(sampling_rate * self.window_sec)  # e.g., 512 × 5 = 2560
 
-                print(f"[Processor] Received data packet with sampling rate: {sampling_rate} Hz")
-
                 # Preprocess this data
-                processed_data = self.process_data(data_packet, sampling_rate)
-                print(f"[Processor] Preprocessed data packet with {len(self.preprocessed_buffers['time'])} samples.")
+                processed_data = self.process_data(data_packet, sampling_rate, location_code)
                 # Add the preprocessed data to the processed queue
                 self.result_queue.put(processed_data)
 
                 # Check if prediction window is ready
+                # print(f"[Processor] Preprocessed buffers updated with {len(self.preprocessed_buffers['time'])} samples.")
                 if len(self.preprocessed_buffers['time']) >= window_size:
                     pain_assessment = self.pain_assessor.predict_from_buffer(preprocessed_buffers=self.preprocessed_buffers, sampling_rate=sampling_rate)
                     if pain_assessment:
                         self.result_queue.put({
-                            "pain_level": pain_assessment['pain_level'],
-                            "timestamp": pain_assessment['timestamp_ns'],
+                            "value": pain_assessment['pain_level'],
+                            "time": pain_assessment['time'],
                             "measurement": "pain_assessment"
                         })
                     else:
                         print("[Processor] Warning: Pain assessment failed.")
 
-                # Reset buffers after prediction
-                for sensor in self.preprocessed_buffers:
-                    self.preprocessed_buffers[sensor].clear()
-                    self.raw_buffers[sensor].clear()
+                    # Reset buffers after prediction
+                    for sensor in self.preprocessed_buffers:
+                        self.preprocessed_buffers[sensor].clear()
+                        self.raw_buffers[sensor].clear()
 
                 # @TODO: Optional: Moving prediction window approach
                 # Clear only the used portion (you can change this to keep overlap)
@@ -73,10 +74,10 @@ class DataProcessor(threading.Thread):
                 time.sleep(0.1)
                 continue
 
-    def process_data(self, data_buffers, sampling_rate=None) -> dict:
+    def process_data(self, data_buffers, sampling_rate, location_code) -> dict:
         """ Preprocesses the raw data buffers and returns preprocessed values. """
         # --- timestamp interpolation ---
-        packet_time = data_buffers['time']  # epoch time in milliseconds
+        packet_time = data_buffers['t']  # epoch time in milliseconds
         num_samples = len(data_buffers['ir'])
 
         delta_t = 1000 / sampling_rate  # e.g. ~1.953125 ms for 512 Hz
@@ -92,28 +93,47 @@ class DataProcessor(threading.Thread):
         ]
 
         # Store both timestamp resolutions
-        self.preprocessed_buffers['timestamp_ns'].extend(interpolated_timestamps_ns)
+        self.preprocessed_buffers['time'].extend(interpolated_timestamps_ns)
 
         # --- signal processing (as you already implemented) ---
         ppg_avg_list = [
             -1 * (ir + red) / 2
             for ir, red in zip(data_buffers['ir'], data_buffers['red'])
         ]
-        filtered_ppg_avg_list = highpass_filter(
+        
+        if location_code == "TW": # Taiwan
+            filtered_ppg_avg_list = highpass_filter(
             ppg_avg_list, cutoff=0.5, fs=sampling_rate
-        )
-        filtered_ecg_list = apply_notch_filter(
-            data_buffers['ecg'], fs=sampling_rate, notch_freq=60, Q=5
-        )
-        filtered_ecg_list = apply_notch_filter(
-            filtered_ecg_list, fs=sampling_rate, notch_freq=120, Q=5
-        )
-        filtered_gsr_list = apply_notch_filter(
-            data_buffers['gsr'], fs=sampling_rate, notch_freq=60, Q=5
-        )
-        filtered_gsr_list = apply_notch_filter(
-            filtered_gsr_list, fs=sampling_rate, notch_freq=120, Q=5
-        )
+            )
+            filtered_ecg_list = apply_notch_filter(
+                data_buffers['ecg'], fs=sampling_rate, notch_freq=60, Q=5
+            )
+            filtered_ecg_list = apply_notch_filter(
+                filtered_ecg_list, fs=sampling_rate, notch_freq=120, Q=5
+            )
+            filtered_gsr_list = apply_notch_filter(
+                data_buffers['gsr'], fs=sampling_rate, notch_freq=60, Q=5
+            )
+            filtered_gsr_list = apply_notch_filter(
+                filtered_gsr_list, fs=sampling_rate, notch_freq=120, Q=5
+            )
+        
+        elif location_code == "VN": # Vietnam
+            filtered_ppg_avg_list = highpass_filter(
+            ppg_avg_list, cutoff=0.5, fs=sampling_rate
+            )
+            filtered_ecg_list = apply_notch_filter(
+                data_buffers['ecg'], fs=sampling_rate, notch_freq=50, Q=5
+            )
+            filtered_ecg_list = apply_notch_filter(
+                filtered_ecg_list, fs=sampling_rate, notch_freq=100, Q=5
+            )
+            filtered_gsr_list = apply_notch_filter(
+                data_buffers['gsr'], fs=sampling_rate, notch_freq=50, Q=5
+            )
+            filtered_gsr_list = apply_notch_filter(
+                filtered_gsr_list, fs=sampling_rate, notch_freq=100, Q=5
+            )
 
         # Append all data
         self.preprocessed_buffers['ir'].extend(data_buffers['ir'])
@@ -122,9 +142,10 @@ class DataProcessor(threading.Thread):
         self.preprocessed_buffers['gsr'].extend(filtered_gsr_list)
         self.preprocessed_buffers['ppg'].extend(filtered_ppg_avg_list)
 
-        print(
-            f"[Processor] Preprocessed buffers updated with {len(self.preprocessed_buffers['timestamp_ns'])} samples."
-        )
+        # Check if all buffers have the same length
+        buffer_lengths = [len(self.preprocessed_buffers[key]) for key in ['ir', 'red', 'ecg', 'gsr', 'ppg', 'time']]
+        if len(set(buffer_lengths)) != 1:
+            print(f"[Processor] Warning: Buffer length mismatch: {dict(zip(['ir', 'red', 'ecg', 'gsr', 'ppg', 'time'], buffer_lengths))}")
 
         # Convert deque to list for output
         processed_dict = {
@@ -156,3 +177,6 @@ class DataProcessor(threading.Thread):
     
     def stop(self):
         self.running = False
+        # clear the result queue
+        while not self.result_queue.empty():
+            self.result_queue.get_nowait()

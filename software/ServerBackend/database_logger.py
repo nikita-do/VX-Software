@@ -1,6 +1,6 @@
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from mqtt_subscriber import MQTTSubscriber
 from data_processor import DataProcessor
 
@@ -22,48 +22,50 @@ def generate_influx_points(data_dict, tags=None):
     points = []
 
     measurement_name = data_dict.get("measurement")
-    print(f"[InfluxDBLogger] Using measurement name: {measurement_name}")
 
-    # Find a key that contains array data
-    data_keys = [
-        k for k in data_dict.keys()
-        if k not in ("measurement", "timestamp_ns", "timestamp_ms")
-    ]
+    if measurement_name == "biosignal":
+        # Find a key that contains array data
+        data_keys = [
+            k for k in data_dict.keys()
+            if k not in ("measurement", "time")
+        ]
 
-    if not data_keys:
-        raise ValueError("No data fields found in data_dict to determine number of points.")
+        num_points = len(data_dict[data_keys[0]])
+        # print(f"[InfluxDBLogger] Determined num_points: {num_points}")
 
-    num_points = len(data_dict[data_keys[0]])
-    print(f"[InfluxDBLogger] Determined num_points: {num_points}")
+        for idx in range(num_points):
+            time = None
+            if "time" in data_dict:
+                time = data_dict["time"][idx]
 
-    for idx in range(num_points):
-        timestamp_ns = None
-        if "timestamp_ns" in data_dict:
-            timestamp_ns = data_dict["timestamp_ns"][idx]
-            print(f"[InfluxDBLogger] Using timestamp_ns: {timestamp_ns} for index {idx}")
+            point = Point(measurement_name)
 
+            if tags is not None:
+                for tag_key, tag_val in tags.items():
+                    point = point.tag(tag_key, str(tag_val))
+
+            for key in data_keys:
+                value = data_dict[key][idx]
+                point = point.field(key, float(value))
+
+            if time is not None:
+                point = point.time(time, write_precision="ns")
+
+            points.append(point)
+    else:
         point = Point(measurement_name)
 
-        if tags:
+        if tags is not None:
             for tag_key, tag_val in tags.items():
                 point = point.tag(tag_key, str(tag_val))
-                print(f"[InfluxDBLogger] Added tag {tag_key}={tag_val}")
-
-        for key, values in data_dict.items():
-            if key in ("timestamp_ns", "measurement"):
-                continue
-            value = values[idx]
-            point = point.field(key, float(value))
-            print(f"[InfluxDBLogger] Added field {key}={value}")
-
-        if timestamp_ns is not None:
-            point = point.time(timestamp_ns, write_precision="ns")
-            print(f"[InfluxDBLogger] Set time for point: {timestamp_ns}")
-
+        
+        point = point.field("value", float(data_dict["value"]))
+        point = point.time(data_dict["time"], write_precision="ns")
+    
         points.append(point)
-        print(f"[InfluxDBLogger] Appended point for index {idx}")
+        
 
-    print(f"[InfluxDBLogger] Finished generating {len(points)} points.")
+    # print(f"[InfluxDBLogger] Finished generating {len(points)} points.")
     return points
 
 class DatabaseLogger(threading.Thread):
@@ -71,10 +73,7 @@ class DatabaseLogger(threading.Thread):
         super().__init__(daemon=True)
 
         self.running = True
-
-        # csv file management
-        self.csv_file = None
-        self.output_writer = None
+        self.start_time = None
 
         # Initialize InfluxDB client
         self.client = InfluxDBClient(url=url, token=token, org=org)
@@ -90,6 +89,96 @@ class DatabaseLogger(threading.Thread):
         self.processor = log_data_provider
         self.subscriber = log_tag_provider
 
+    def run(self):
+        print("[DatabaseLogger] Thread started.")
+        last_measuring_state = False
+        self.start_time = None
+
+        while self.running:
+            try:
+                is_measuring = self.subscriber.is_device_measuring()
+
+                if is_measuring:
+                    result = self.processor.get_output_queue()
+
+                    if not last_measuring_state:
+                        # Device just started measuring
+                        dt = datetime.fromtimestamp(
+                            result["time"][0] / 1e9,
+                            tz=timezone.utc
+                        )
+                        self.start_time = dt.isoformat().replace("+00:00", "Z")
+                        print(f"[DatabaseLogger] Measurement started at {self.start_time}")
+                        last_measuring_state = True
+
+                    # Process and write data
+                    user_info = self.subscriber.get_user_info()
+                    points = generate_influx_points(result, tags=user_info)
+                    try:
+                        self.write_api.write(bucket=self.bucket, org=self.org, record=points)
+                        print(f"[DatabaseLogger] Data written to InfluxDB for measurement: {result['measurement']}")
+                    except Exception as e:
+                        print(f"[DatabaseLogger] Error writing to InfluxDB: {e}")
+                        continue
+
+                else:
+                    if last_measuring_state:
+                        # Device just stopped measuring
+                        stop_dt = datetime.now(timezone.utc)
+                        end_time_str = stop_dt.isoformat().replace("+00:00", "Z")
+
+                        self.save_csv_from_influx(
+                            start_time=self.start_time,
+                            end_time=end_time_str,
+                            filename= None  # Use default filename based on timestamp
+                        )
+                        print("[DatabaseLogger] Measurement stopped. Data saved to CSV.")
+
+                        last_measuring_state = False
+                        self.start_time = None  # reset for next session
+
+                time.sleep(0.05)
+
+            except Exception as e:
+                print(f"[DatabaseLogger] Error: {e}")
+                time.sleep(0.1)
+
+    def save_csv_from_influx(self, start_time, end_time, filename=None):
+        """
+        Save data from InfluxDB to a CSV file within the specified time range.
+        If filename is not provided, it will be generated based on the current timestamp.
+        """
+        # Ensure the 'data' directory exists
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        os.makedirs(data_dir, exist_ok=True)
+        if filename is not None:
+            filename = os.path.join(data_dir, filename)
+        else:
+            filename = os.path.join(data_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + ".csv")
+
+        if start_time is None:
+            start_time = "-1h"  # Default to last hour if no start_time is set
+
+        if end_time is None:
+            end_time = datetime.now(timezone.utc).isoformat()
+
+        query = f"""
+        from(bucket: "{self.bucket}")
+            |> range(start: {start_time}, stop: {end_time})
+            |> filter(fn: (r) => r["_measurement"] == "biosignal")
+            |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+        """
+
+        try:
+            result = self.client.query_api().query_data_frame(query)
+            if result.empty:
+                print("[DatabaseLogger] No data found in specified time range.")
+                return
+            result.to_csv(filename, index=False)
+            print(f"[DatabaseLogger] Data saved to {filename}")
+        except Exception as e:
+            print(f"[DatabaseLogger] Error saving data to CSV: {e}")
+
     # def _log_to_influxdb(self, data):
     #     try:
     #         point = (
@@ -103,79 +192,13 @@ class DatabaseLogger(threading.Thread):
     #         print(f"[InfluxDBLogger] Logged prediction for {data['sensor']}")
     #     except Exception as e:
     #         print(f"[InfluxDBLogger] Error: {e}")
-
-    def run(self):
-        print("[DatabaseLogger] Thread started.")
-
-        while self.running:
-            try:
-                result = self.processor.get_output_queue()
-                user_info = self.subscriber.get_user_info()
-
-                points = generate_influx_points(result, tags=user_info)
-                
-                is_measuring = self.subscriber.is_device_measuring()
-                if is_measuring:
-                    if result.get("measurement") == "pain_assessment":
-                        # If it's a pain assessment, generate a CSV file
-                        self._log_to_csv(result, tags=user_info)
-                else:
-                    # close the CSV file
-                    self.close_csv_file()
-
-                self.write_api.write(bucket=self.bucket, org=self.org, record=points)
-                print(f"[DatabaseLogger] {datetime.now()} → Wrote {len(points)} points")
-            except Exception as e:
-                print(f"[DatabaseLogger] Error {e}")
-                time.sleep(0.1)
-                continue
-
-    def _log_to_csv(self, data, tags=None):
-        try:
-            if self.csv_file is None or self.csv_file.closed:
-                filename = datetime.now().strftime("%Y%m%d_%H%M%S") + ".csv"
-                self.csv_file = open(filename, mode="a", newline="")
-                self.output_writer = csv.writer(self.csv_file)
-
-                # Write tags as first row
-                if tags:
-                    tag_row = [f"{k}={v}" for k, v in tags.items()]
-                    self.output_writer.writerow(tag_row)
-                else:
-                    self.output_writer.writerow([])
-
-                # Write header
-                fieldnames = [k for k in data.keys() if k != "measurement"]
-                self.output_writer.writerow(fieldnames)
-
-                print(f"[DatabaseLogger] CSV file '{filename}' created with header.")
-            else:
-                fieldnames = [k for k in data.keys() if k != "measurement"]
-
-            # Write new rows
-            num_rows = len(data[fieldnames[0]]) if fieldnames else 0
-            for idx in range(num_rows):
-                row = [data[key][idx] for key in fieldnames]
-                self.output_writer.writerow(row)
-
-            self.csv_file.flush()
-            print(f"[DatabaseLogger] Wrote {num_rows} rows to CSV file.")
-
-        except Exception as e:
-            print(f"[DatabaseLogger] Error writing to CSV: {e}")
-
-    def close_csv_file(self):
-        """Close the CSV file if it is open."""
-        if self.csv_file and not self.csv_file.closed:
-            self.csv_file.close()
-            print("[DatabaseLogger] Closed CSV file successfully.")
-        else:
-            print("[DatabaseLogger] No CSV file to close or it is already closed.")
    
     def stop(self):
         self.running = False
+        if self.start_time is not None:
+            print(f"[DatabaseLogger] Stopping logger. Saving data from {self.start_time} to now.")
+            self.save_csv_from_influx(self.start_time, None, None)
         self.client.close()  # Close InfluxDB client
-        self.close_csv_file()  # Close csv file if it was opened
         
         # Close csv file if it was opened
 

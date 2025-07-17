@@ -11,20 +11,21 @@ MQTT_TOPICS = {
     "TOPIC_DEVICE_STATUS": (f"device/$$$/status_online", 1),  # Device online status topic
     "TOPIC_DEVICE_ATTR_FS": (f"device/$$$/attributes/sampling_rate", 1),  # Device sampling rate topic
     "TOPIC_DEVICE_ATTR_N": (f"device/$$$/attributes/sample_batch", 1),  # Device sample batch topic
+
     "TOPIC_DEVICE_RESP_START": (f"device/$$$/responses/start", 1),  # Device response start topic
     "TOPIC_DEVICE_RESP_RESET": (f"device/$$$/responses/reset", 1),  # Device response reset topic
     "TOPIC_DEVICE_CMD_START": (f"device/$$$/commands/start", 1),  # Device command start topic
     "TOPIC_DEVICE_CMD_RESET": (f"device/$$$/commands/reset", 1),  # Device command reset topic
     "TOPIC_DEVICE_DATA": (f"device/$$$/data", 1),  # Device data topic
     
-    "TOPIC_CLIENT_INFO": (f"backend/client/$$$/info", 1),  # Client user info topic
+    "TOPIC_CLIENT_INFO": (f"client/$$$/info", 1),  # Client user info topic
     
-    "TOPIC_CLIENT_INFO_ID": (f"backend/client/$$$/info/id", 1),  # Client user ID topic
-    "TOPIC_CLIENT_INFO_AGE": (f"backend/client/$$$/info/age", 1),  # Client user age topic
-    "TOPIC_CLIENT_INFO_GENDER": (f"backend/client/$$$/info/gender", 1), # Client user gender topic
-    "TOPIC_CLIENT_INFO_WEIGHT": (f"backend/client/$$$/info/weight", 1),  # Client user weight topic
-    "TOPIC_CLIENT_INFO_HEIGHT": (f"backend/client/$$$/info/height", 1),  # Client user height topic
-    
+    "TOPIC_CLIENT_INFO_ID": (f"client/$$$/info/id", 1),  # Client user ID topic
+    "TOPIC_CLIENT_INFO_AGE": (f"client/$$$/info/age", 1),  # Client user age topic
+    "TOPIC_CLIENT_INFO_GENDER": (f"client/$$$/info/gender", 1), # Client user gender topic
+    "TOPIC_CLIENT_INFO_WEIGHT": (f"client/$$$/info/weight", 1),  # Client user weight topic
+    "TOPIC_CLIENT_INFO_HEIGHT": (f"client/$$$/info/height", 1),  # Client user height topic
+    "TOPIC_CLIENT_INFO_LOCATION": (f"client/$$$/info/location", 1),  # Client user location topic
 }
 
 class MQTTSubscriber():
@@ -63,6 +64,8 @@ class MQTTSubscriber():
         """Callback when the client connects to the broker."""
 
         print(f"[MQTT] Connected with code {rc}")
+        # Publish backend status as online
+        self.client.publish("backend/status_online", payload="true", qos=1, retain=True)
 
         # Check if a device ID is provided, and subscribe to the topics accordingly
         if self.subcribed_device_id != "$$$":
@@ -144,7 +147,6 @@ class MQTTSubscriber():
                 data = json.loads(serialized_data)
 
                 if isinstance(data, dict):
-                    print(f"[MQTT] Validated data with length: {len(data)}")
                     self.packet_queue.put(data)
                 else:
                     raise ValueError("[MQTT] Invalid data. Expected a dictionary.")
@@ -193,6 +195,7 @@ class MQTTSubscriber():
     
     def stop(self):
         """Stop the MQTT client loop and disconnect."""
+        self.client.publish("backend/status_online", payload="false", qos=1, retain=True)
         self.client.loop_stop()
         self.client.disconnect()
         print("[MQTT] Disconnected from broker")
@@ -232,3 +235,8 @@ class MQTTSubscriber():
     def get_user_info(self) -> dict:
         with self._lock:
             return self.user_info
+        
+    def get_location(self) -> str:
+        """Get the location code from user info."""
+        with self._lock:
+            return self.user_info.get("location", "TW") # Default to Taiwan if not set

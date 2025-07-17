@@ -52,7 +52,7 @@ class PainAssessor:
                 'HRV_RMSSD': np.nan,
                 'HRV_SDSD': np.nan,
                 'HRV_SDRMSSD': np.nan,
-                'HRV_pNN50': np.nan,
+                # 'HRV_pNN50': np.nan,
             }
 
             # GSR features
@@ -96,7 +96,7 @@ class PainAssessor:
                 hrv_features['HRV_SDNN'] = hrv['HRV_SDNN']
                 hrv_features['HRV_RMSSD'] = hrv['HRV_RMSSD']
                 hrv_features['HRV_SDSD'] = hrv['HRV_SDSD']
-                hrv_features['HRV_pNN50'] = hrv['HRV_pNN50']
+                # hrv_features['HRV_pNN50'] = hrv['HRV_pNN50']
                 hrv_features['HRV_SDRMSSD'] = hrv['HRV_SDRMSSD']
 
             except Exception as e:
@@ -118,7 +118,7 @@ class PainAssessor:
                 else:
                     gsr_features['gsr_amp'] = np.nan
                     gsr_features['gsr_max'] = np.nan
-                    print("[DEBUG] No GSR Peak detected!")
+                    print("[PainAccessor] No GSR Peak detected!")
 
             except Exception as e:
                 print(f"gsr peaks error: {e}")
@@ -140,14 +140,6 @@ class PainAssessor:
 
         predicted_label = self.model.predict(features_pca)
         return predicted_label[0]
-
-    # def predict_from_file(self, file_path):
-    #     try:
-    #         features = self.extract_feature_from_file(file_path)
-    #     except Exception as e:
-    #         print(e)
-    #         return None
-    #     return self.predict(features)
         
     def predict_from_buffer(self, preprocessed_buffers, sampling_rate) -> dict:
         """ Predicts the pain level based on the preprocessed buffers. """
@@ -161,20 +153,25 @@ class PainAssessor:
         gsr_segment = gsr_list[-roi:]
 
         # Check for None values in the ROI
-        if any(val is None for val in ecg_segment) or any(val is None for val in gsr_segment):
+        if any(val is np.nan for val in ecg_segment) or any(val is np.nan for val in gsr_segment):
             print("[PainAssessor] Skipping prediction due to None values in the ROI.")
             return None
 
         try:
             # Extract features
             features = self.extract_feature(ecg_segment, gsr_segment, sampling_rate)
+
+            # Check for any nan or empty values in the features DataFrame
+            if any(val is np.nan for val in features.values.flatten()):
+                print('[PainAssessor] Features DataFrame contains NaN values.')
+                return None
             
             if isinstance(features, pd.DataFrame) and not features.empty:  # adjust this condition if necessary
                 # Run prediction
                 pain_level = self.predict(features)
                 timestamp_ns = time.time_ns()
                 print(f"[PainAssessor] Predicted pain level: {pain_level} at timestamp {timestamp_ns}")
-                return {"pain_level": pain_level, "timestamp": timestamp_ns}
+                return {"pain_level": pain_level, "time": timestamp_ns}
             else:
                 print('[PainAssessor] Missing or invalid feature(s)')
                 return None
@@ -182,6 +179,15 @@ class PainAssessor:
         except Exception as e:
             print(e)
             return None
+        
+    
+    # def predict_from_file(self, file_path):
+    #     try:
+    #         features = self.extract_feature_from_file(file_path)
+    #     except Exception as e:
+    #         print(e)
+    #         return None
+    #     return self.predict(features)
 
     # def _up_sampling_all(self, time, gsr, ecg, ppg, current_fs, up_fs):
     #     upSamplingRateFactor = up_fs / current_fs

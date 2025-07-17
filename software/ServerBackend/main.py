@@ -52,6 +52,7 @@ class MainServer:
             scaler_path=PROCESSOR_CONFIG["scaler_path"],
             pca_path=PROCESSOR_CONFIG["pca_path"],
             data_provider=self.packet_processor,
+            config_provider=self.mqtt_client,
             prediction_window_sec=5.5,
         )
 
