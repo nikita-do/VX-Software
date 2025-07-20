@@ -7,7 +7,7 @@ import paho.mqtt.client as mqtt
 MQTT_CLIENT_ID = "BME_SERVER"
 
 MQTT_TOPICS = {
-    "TOPIC_DEVICE": ("device", 0),  # Device ID topic
+    "TOPIC_DEVICE": ("device/", 0),  # Device ID topic
     "TOPIC_DEVICE_STATUS": (f"device/$$$/status_online", 1),  # Device online status topic
     "TOPIC_DEVICE_ATTR_FS": (f"device/$$$/attributes/sampling_rate", 1),  # Device sampling rate topic
     "TOPIC_DEVICE_ATTR_N": (f"device/$$$/attributes/sample_batch", 1),  # Device sample batch topic
@@ -18,14 +18,14 @@ MQTT_TOPICS = {
     "TOPIC_DEVICE_CMD_RESET": (f"device/$$$/commands/reset", 1),  # Device command reset topic
     "TOPIC_DEVICE_DATA": (f"device/$$$/data", 1),  # Device data topic
     
-    "TOPIC_CLIENT_INFO": (f"client/$$$/info", 1),  # Client user info topic
+    "TOPIC_USER_INFO": (f"device/$$$/user", 1),  # Client user info topic
     
-    "TOPIC_CLIENT_INFO_ID": (f"client/$$$/info/id", 1),  # Client user ID topic
-    "TOPIC_CLIENT_INFO_AGE": (f"client/$$$/info/age", 1),  # Client user age topic
-    "TOPIC_CLIENT_INFO_GENDER": (f"client/$$$/info/gender", 1), # Client user gender topic
-    "TOPIC_CLIENT_INFO_WEIGHT": (f"client/$$$/info/weight", 1),  # Client user weight topic
-    "TOPIC_CLIENT_INFO_HEIGHT": (f"client/$$$/info/height", 1),  # Client user height topic
-    "TOPIC_CLIENT_INFO_LOCATION": (f"client/$$$/info/location", 1),  # Client user location topic
+    "TOPIC_USER_INFO_ID": (f"device/$$$/user/id", 1),  # Client user ID topic
+    "TOPIC_USER_INFO_AGE": (f"device/$$$/user/age", 1),  # Client user age topic
+    "TOPIC_USER_INFO_GENDER": (f"device/$$$/user/gender", 1), # Client user gender topic
+    "TOPIC_USER_INFO_WEIGHT": (f"device/$$$/user/weight", 1),  # Client user weight topic
+    "TOPIC_USER_INFO_HEIGHT": (f"device/$$$/user/height", 1),  # Client user height topic
+    "TOPIC_USER_INFO_LOCATION": (f"device/$$$/user/location", 1),  # Client user location topic
 }
 
 class MQTTSubscriber():
@@ -115,6 +115,7 @@ class MQTTSubscriber():
                 elif device_status == "false":
                     print("[MQTT] Device is offline")
                     is_online = False
+                    self.client.publish(MQTT_TOPICS["TOPIC_DEVICE_RESP_START"][0], payload="false", qos=1, retain=True)
                 else:
                     print(f"[MQTT] Device Unknown status: {device_status}")
 
@@ -170,7 +171,7 @@ class MQTTSubscriber():
                     self.measuring = is_measuring
                 return
             
-            elif topic.startswith(MQTT_TOPICS["TOPIC_CLIENT_INFO"][0]):
+            elif topic.startswith(MQTT_TOPICS["TOPIC_USER_INFO"][0]):
                 # Handle client user info topics
                 user_info_key = topic.split("/")[-1]  # Get the last part of the topic
                 user_info_value = payload.decode("utf-8")
@@ -207,7 +208,10 @@ class MQTTSubscriber():
         for key, (topic, qos) in MQTT_TOPICS.items():
             MQTT_TOPICS[key] = (topic.replace("$$$", device_id), qos)
         print(f"[MQTT] Updated topics for device ID: {self.subcribed_device_id}")
-    
+
+    def publish_data_link(self, link: str):
+        self.client.publish(f"device/{self.subcribed_device_id}/data/file", payload=link, qos=1, retain=False)
+
     def get_output_queue(self) -> dict:
         """Return the data for processing."""
         return self.packet_queue.get()

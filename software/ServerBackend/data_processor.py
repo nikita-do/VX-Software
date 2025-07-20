@@ -1,5 +1,6 @@
 import threading
 import time
+import pandas as pd
 import queue
 from collections import defaultdict, deque
 from pain_assessor import PainAssessor
@@ -48,13 +49,29 @@ class DataProcessor(threading.Thread):
                 # Check if prediction window is ready
                 # print(f"[Processor] Preprocessed buffers updated with {len(self.preprocessed_buffers['time'])} samples.")
                 if len(self.preprocessed_buffers['time']) >= window_size:
-                    pain_assessment = self.pain_assessor.predict_from_buffer(preprocessed_buffers=self.preprocessed_buffers, sampling_rate=sampling_rate)
-                    if pain_assessment:
+                    timestamp_ns = time.time_ns()
+                    pain_assessment = self.pain_assessor.predict_from_buffer(
+                        self.preprocessed_buffers, sampling_rate)
+
+                    if pain_assessment is not None:
+                        features = self.pain_assessor.get_features()
                         self.result_queue.put({
-                            "value": pain_assessment['pain_level'],
-                            "time": pain_assessment['time'],
+                            "value": pain_assessment,
+                            "time": timestamp_ns,
                             "measurement": "pain_assessment"
                         })
+
+                        if features is not None and not features.empty:
+                            row_dict = features.iloc[0].to_dict()
+                            processed_dict = {
+                                key: float(value) if pd.notnull(value) else None
+                                for key, value in row_dict.items()
+                            }
+                            processed_dict["measurement"] = "features"
+                            processed_dict["time"] = timestamp_ns
+                            self.result_queue.put(processed_dict)
+                        else:
+                            print("[Processor] Warning: Features extraction returned empty.")
                     else:
                         print("[Processor] Warning: Pain assessment failed.")
 

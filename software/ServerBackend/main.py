@@ -3,6 +3,7 @@ from mqtt_subscriber import MQTTSubscriber
 from data_processor import DataProcessor
 from packet_processor import PacketProcessor
 from database_logger import DatabaseLogger
+from drive_uploader import DriveUploader
 
 # MQTT and Database Configuration
 MQTT_CONFIG = {
@@ -62,8 +63,8 @@ class MainServer:
             token=influx_config["token"],
             org=influx_config["org"],
             bucket=influx_config["bucket"],
-            log_data_provider=self.data_processor,
-            log_tag_provider=self.mqtt_client
+            data_provider=self.data_processor,
+            tag_provider=self.mqtt_client,
         )
         
     def start(self):

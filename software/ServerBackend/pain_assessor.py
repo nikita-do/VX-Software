@@ -9,6 +9,9 @@ import numpy as np
 import neurokit2 as nk
 from scipy.stats import skew, kurtosis
 import time
+from threading import Lock
+import queue
+from scipy.stats import iqr
 
 class PainAssessor:
     def __init__(self, model_path, scaler_path, pca_path, prediction_window_sec=5.5):
@@ -17,12 +20,14 @@ class PainAssessor:
             self.scaler = joblib.load(scaler_path)
             self.pca = joblib.load(pca_path)
         except FileNotFoundError as e:
-            print('Some of these files are missing: pain_votingclassifier_J.pkl, scaler.pkl, pca.pkl')
-            print('Please ensure that all of these files are present in this directory')
+            print('[PainAssessor] Some of these files are missing: pain_votingclassifier_J.pkl, scaler.pkl, pca.pkl')
+            print('[PainAssessor] Please ensure that all of these files are present in this directory')
             quit()
-
+        
         # Region of interest in seconds
         self.prediction_window_sec = prediction_window_sec
+        self.lock = Lock()
+        self.features = queue.Queue(maxsize=100)  # Queue for storing features
 
     # def extract_feature_from_file(self, file_path):
     #     data = pd.read_csv(file_path, header=2)
@@ -33,106 +38,52 @@ class PainAssessor:
 
     def extract_feature(self, ecg, gsr, sampling_rate):
         try:
-            # Initialize feature dictionaries
+            # === Preprocess ECG and GSR ===
+            ecg_cleaned = nk.ecg_clean(ecg, sampling_rate=sampling_rate)
+            gsr_cleaned = nk.eda_clean(gsr, sampling_rate=sampling_rate)
+            eda_signals, info = nk.eda_process(gsr_cleaned, sampling_rate=sampling_rate)
+            gsr_phasic = eda_signals["EDA_Phasic"]
+
+            # === Extract GSR Features ===
             gsr_features = {
-                'gsr_amp': np.nan,
-                'gsr_max': np.nan,
-                'gsr_skew': np.nan,
-                'gsr_kurt': np.nan,
-                'gsr_sd': np.nan,
-                'gsr_range': np.nan,
-                'gsr_iqr': np.nan,
-                'gsr_sdmn': np.nan,
-                'gsr_sdsd': np.nan,
+                'gsr_amp': np.ptp(gsr_phasic),  # peak-to-peak (amplitude)
+                'gsr_max': np.max(gsr_phasic),
+                'gsr_skew': skew(gsr_phasic),
+                'gsr_kurt': kurtosis(gsr_phasic),
+                'gsr_sd': np.std(gsr_phasic),
+                'gsr_range': np.max(gsr_phasic) - np.min(gsr_phasic),
+                'gsr_iqr': iqr(gsr_phasic),
+                'gsr_sdmn': np.std(gsr_phasic) / np.mean(gsr_phasic) if np.mean(gsr_phasic) != 0 else np.nan,
+                'gsr_sdsd': np.std(np.diff(gsr_phasic)),
             }
 
-            hrv_features = {
-                'HRV_MeanNN': np.nan,
-                'HRV_SDNN': np.nan,
-                'HRV_RMSSD': np.nan,
-                'HRV_SDSD': np.nan,
-                'HRV_SDRMSSD': np.nan,
-                # 'HRV_pNN50': np.nan,
-            }
-
-            # GSR features
+            # === Extract ECG Features (HRV) ===
             try:
-                gsr = nk.eda_phasic(gsr, sampling_rate=sampling_rate, method='cvxeda')
-                gsr_phasic = gsr['EDA_Phasic'].values
-
-                gsr_features['gsr_skew'] = skew(gsr_phasic)
-                gsr_features['gsr_kurt'] = kurtosis(gsr_phasic, fisher=False)
-                gsr_features['gsr_sd'] = np.std(gsr_phasic)
-                gsr_features['gsr_range'] = np.ptp(gsr_phasic)
-                gsr_features['gsr_iqr'] = np.percentile(gsr_phasic, 75) - np.percentile(gsr_phasic, 25)
-
-                window_size = 512
-                if len(gsr_phasic) < window_size:
-                    gsr_means = [np.mean(gsr_phasic)]
-                    gsr_sds = [np.std(gsr_phasic)]
-                else:
-                    gsr_means = [np.mean(gsr_phasic[i:i+window_size])
-                                for i in range(0, len(gsr_phasic), window_size)]
-                    gsr_sds = [np.std(gsr_phasic[i:i+window_size])
-                            for i in range(0, len(gsr_phasic), window_size)]
-
-                gsr_features['gsr_sdmn'] = np.std(gsr_means)
-                gsr_features['gsr_sdsd'] = np.std(gsr_sds)
-
+                # Use NeuroKit to extract HRV features
+                ecg_signals, info = nk.ecg_process(ecg_cleaned, sampling_rate=sampling_rate)
+                hrv = nk.hrv_time(ecg_signals['ECG_R_Peaks'], sampling_rate=sampling_rate, show=False)
+                hrv_features = {
+                    'HRV_MeanNN': hrv['HRV_MeanNN'].values[0],
+                    'HRV_SDNN': hrv['HRV_SDNN'].values[0],
+                    'HRV_RMSSD': hrv['HRV_RMSSD'].values[0],
+                    'HRV_SDSD': hrv['HRV_SDSD'].values[0],
+                    'HRV_SDRMSSD': hrv['HRV_SDNN'].values[0] / hrv['HRV_RMSSD'].values[0] if hrv['HRV_RMSSD'].values[0] != 0 else np.nan,
+                }
             except Exception as e:
-                print(f"gsr signal error: {e}")
-                return pd.DataFrame()
+                print(f"[HRV Extraction Error]: {e}")
+                hrv_features = {k: np.nan for k in [
+                    'HRV_MeanNN', 'HRV_SDNN', 'HRV_RMSSD', 'HRV_SDSD', 'HRV_SDRMSSD'
+                ]}
 
-            # ECG features
-            try:
-                signals, info = nk.ecg_peaks(ecg, sampling_rate=sampling_rate, correct_artifacts=True)
-                peaks = info["ECG_R_Peaks"]
-                if len(peaks) < 2:
-                    print("Not enough ECG peaks detected.")
-                    return pd.DataFrame()
-                hrv = nk.hrv_time(peaks, sampling_rate=sampling_rate, show=False)
-
-                hrv_features['HRV_MeanNN'] = hrv['HRV_MeanNN']
-                hrv_features['HRV_SDNN'] = hrv['HRV_SDNN']
-                hrv_features['HRV_RMSSD'] = hrv['HRV_RMSSD']
-                hrv_features['HRV_SDSD'] = hrv['HRV_SDSD']
-                # hrv_features['HRV_pNN50'] = hrv['HRV_pNN50']
-                hrv_features['HRV_SDRMSSD'] = hrv['HRV_SDRMSSD']
-
-            except Exception as e:
-                print(f"ecg signal error: {e}")
-                return pd.DataFrame()
-
-            # GSR peaks
-            try:
-                _, neurokit = nk.eda_peaks(gsr_phasic, sampling_rate=sampling_rate, method='neurokit')
-                gsr_max_indices = neurokit['SCR_Peaks']
-                num_peaks = len(gsr_max_indices)
-
-                if num_peaks == 1:
-                    gsr_features['gsr_amp'] = neurokit['SCR_Amplitude'][0]
-                    gsr_features['gsr_max'] = gsr_phasic[gsr_max_indices[0]]
-                elif num_peaks >= 2:
-                    gsr_features['gsr_amp'] = neurokit['SCR_Amplitude'][-1]
-                    gsr_features['gsr_max'] = gsr_phasic[gsr_max_indices[-1]]
-                else:
-                    gsr_features['gsr_amp'] = np.nan
-                    gsr_features['gsr_max'] = np.nan
-                    print("[PainAccessor] No GSR Peak detected!")
-
-            except Exception as e:
-                print(f"gsr peaks error: {e}")
-                return pd.DataFrame()
-
-            # Assemble all features
-            features = {**gsr_features, **hrv_features}
-            feature_row = pd.DataFrame([features])
-
-            return feature_row
+            # === Combine All Features ===
+            all_features = {**gsr_features, **hrv_features}
+            return pd.DataFrame([all_features])
 
         except Exception as e:
-            print(f"feature extraction error: {e}")
-            return pd.DataFrame()
+            print(f"[Feature Extraction Error]: {e}")
+            # Return NaN dataframe in case of failure
+            empty_features = {**gsr_features, **hrv_features}
+            return pd.DataFrame([empty_features])
         
     def predict(self, features):
         features_scaled = self.scaler.transform(features)
@@ -160,18 +111,14 @@ class PainAssessor:
         try:
             # Extract features
             features = self.extract_feature(ecg_segment, gsr_segment, sampling_rate)
-
-            # Check for any nan or empty values in the features DataFrame
-            if any(val is np.nan for val in features.values.flatten()):
-                print('[PainAssessor] Features DataFrame contains NaN values.')
-                return None
             
             if isinstance(features, pd.DataFrame) and not features.empty:  # adjust this condition if necessary
                 # Run prediction
                 pain_level = self.predict(features)
-                timestamp_ns = time.time_ns()
-                print(f"[PainAssessor] Predicted pain level: {pain_level} at timestamp {timestamp_ns}")
-                return {"pain_level": pain_level, "time": timestamp_ns}
+                print(f"[PainAssessor] Predicted pain level: {pain_level}")
+                with self.lock:
+                    self.features.put(features)
+                return pain_level
             else:
                 print('[PainAssessor] Missing or invalid feature(s)')
                 return None
@@ -207,3 +154,11 @@ class PainAssessor:
     # def _crop_data(self, data, fs):
     #     roi_samples = int(fs * self.prediction_window_sec)                
     #     return data[0:roi_samples]
+
+    def get_features(self):
+        """
+        Returns the features queue.
+        This can be used to retrieve the features for further processing or analysis.
+        """
+        with self.lock:
+            return self.features.get()

@@ -3,9 +3,9 @@ import threading
 from datetime import datetime, timezone
 from mqtt_subscriber import MQTTSubscriber
 from data_processor import DataProcessor
+from drive_uploader import DriveUploader
 
 from influxdb_client import InfluxDBClient, Point, WriteOptions
-import csv
 import os
 
 def generate_influx_points(data_dict, tags=None):
@@ -52,7 +52,27 @@ def generate_influx_points(data_dict, tags=None):
                 point = point.time(time, write_precision="ns")
 
             points.append(point)
-    else:
+
+    elif measurement_name == "features":
+        point = Point(measurement_name)
+
+        if tags is not None:
+            for tag_key, tag_val in tags.items():
+                point = point.tag(tag_key, str(tag_val))
+
+        for key, value in data_dict.items():
+            if key not in ("measurement", "time"):
+                try:
+                    point = point.field(key, float(value))
+                except Exception as e:
+                    print(f"[DatabaseLogger] Could not add field {key}: {e}")
+
+        if "time" in data_dict:
+            point = point.time(data_dict["time"], write_precision="ns")
+
+        points.append(point)
+
+    elif measurement_name == "pain_assessment":
         point = Point(measurement_name)
 
         if tags is not None:
@@ -64,12 +84,13 @@ def generate_influx_points(data_dict, tags=None):
     
         points.append(point)
         
-
+    else:
+        print(f"[InfluxDBLogger] Unknown measurement type: {measurement_name}. No points generated.")
     # print(f"[InfluxDBLogger] Finished generating {len(points)} points.")
     return points
 
 class DatabaseLogger(threading.Thread):
-    def __init__(self, url, token, org, bucket, log_data_provider: DataProcessor, log_tag_provider: MQTTSubscriber):
+    def __init__(self, url, token, org, bucket, data_provider: DataProcessor, tag_provider: MQTTSubscriber):
         super().__init__(daemon=True)
 
         self.running = True
@@ -86,17 +107,30 @@ class DatabaseLogger(threading.Thread):
         # Store the bucket and organization
         self.bucket = bucket
         self.org = org
-        self.processor = log_data_provider
-        self.subscriber = log_tag_provider
+        self.processor = data_provider
+        self.subscriber = tag_provider
+        # Initialize Drive uploader
+        self.drive_uploader = DriveUploader()
 
     def run(self):
         print("[DatabaseLogger] Thread started.")
         last_measuring_state = False
         self.start_time = None
 
+        # Ensure the uploader is authenticated and folder is created
+        if self.drive_uploader is not None:
+            try:
+                self.drive_uploader.authenticate()
+                # self.drive_uploader.get_or_create_folder()
+                print("[DatabaseLogger] Google Drive uploader initialized.")
+            except Exception as e:
+                print(f"[DatabaseLogger] Error initializing Google Drive uploader: {e}")
+                self.drive_uploader = None
+
         while self.running:
             try:
                 is_measuring = self.subscriber.is_device_measuring()
+                # is_online = self.subscriber.is_device_online()
 
                 if is_measuring:
                     result = self.processor.get_output_queue()
@@ -127,12 +161,24 @@ class DatabaseLogger(threading.Thread):
                         stop_dt = datetime.now(timezone.utc)
                         end_time_str = stop_dt.isoformat().replace("+00:00", "Z")
 
-                        self.save_csv_from_influx(
+                        data_path = self.save_csv_from_influx(
                             start_time=self.start_time,
                             end_time=end_time_str,
                             filename= None  # Use default filename based on timestamp
                         )
                         print("[DatabaseLogger] Measurement stopped. Data saved to CSV.")
+
+                        # Optionally, upload to Google Drive
+                        if self.drive_uploader is not None and data_path is not None:
+                            view_link = self.drive_uploader.upload_file(
+                                filepath = data_path
+                            )
+
+                            self.subscriber.publish_data_link(link=view_link)
+                            print("[DatabaseLogger] Data uploaded to Google Drive and link published to MQTT.")
+
+                        else:
+                            print("[DatabaseLogger] Google Drive uploader not available or data path is None.")
 
                         last_measuring_state = False
                         self.start_time = None  # reset for next session
@@ -176,8 +222,10 @@ class DatabaseLogger(threading.Thread):
                 return
             result.to_csv(filename, index=False)
             print(f"[DatabaseLogger] Data saved to {filename}")
+            return filename
         except Exception as e:
             print(f"[DatabaseLogger] Error saving data to CSV: {e}")
+            return None
 
     # def _log_to_influxdb(self, data):
     #     try:
