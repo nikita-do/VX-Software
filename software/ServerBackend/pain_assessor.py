@@ -92,7 +92,7 @@ class PainAssessor:
         predicted_label = self.model.predict(features_pca)
         return predicted_label[0]
         
-    def predict_from_buffer(self, preprocessed_buffers, sampling_rate) -> dict:
+    def predict_from_buffer(self, preprocessed_buffers, sampling_rate) -> int:
         """ Predicts the pain level based on the preprocessed buffers. """
 
         roi = int(self.prediction_window_sec * sampling_rate)

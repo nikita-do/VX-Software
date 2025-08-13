@@ -1,6 +1,100 @@
 from scipy.signal import butter, filtfilt, iirnotch, lfilter
 import pywt
 import numpy as np
+import neurokit2 as nk
+
+def ecg_nk_filter(data, fs, powerline=50, order=5) :
+    ecg = nk.ecg_clean(data, sampling_rate=fs, method="neurokit", lowcut=0.5, highcut=40, powerline=powerline, order=order)
+    return ecg
+
+def gsr_nk_filter(data, fs):
+    gsr = nk.eda_clean(data, sampling_rate=fs, method="neurokit")
+    return gsr
+
+# def powerline_filter(data, fs, powerline=50, order=4):
+#     signal = nk.signal_filter(data, method="powerline", sampling_rate=fs, powerline=powerline, order=order)
+#     return signal
+
+from scipy.signal import firwin, lfilter, lfilter_zi
+
+def firfilter_bandpass(signal, fs, cutoff, numtaps=101, zi=None):
+    nyq = 0.5 * fs
+    low, high = cutoff[0] / nyq, cutoff[1] / nyq
+    b = firwin(numtaps, [low, high], pass_zero=False)
+    if zi is None:
+        zi = lfilter_zi(b, [1.0]) * signal[0]
+    filtered, zf = lfilter(b, [1.0], signal, zi=zi)
+    return filtered, zf
+
+def firfilter_lowpass(signal, fs, cutoff, numtaps=101, zi=None):
+    nyq = 0.5 * fs
+    normalized_cutoff = cutoff / nyq
+    b = firwin(numtaps, normalized_cutoff)
+    if zi is None:
+        zi = lfilter_zi(b, [1.0]) * signal[0]
+    filtered, zf = lfilter(b, [1.0], signal, zi=zi)
+    return filtered, zf
+
+def firfilter_highpass(signal, fs, cutoff, numtaps=101, zi=None):
+    nyq = 0.5 * fs
+    normalized_cutoff = cutoff / nyq
+    b = firwin(numtaps, normalized_cutoff, pass_zero=False)
+    if zi is None:
+        zi = lfilter_zi(b, [1.0]) * signal[0]
+    filtered, zf = lfilter(b, [1.0], signal, zi=zi)
+    return filtered, zf
+
+def firfilter_notch(signal, fs, notch_freq, notch_width=1.0, numtaps=101, zi=None):
+    nyq = 0.5 * fs
+    notch_center = notch_freq / nyq
+    width = notch_width / nyq
+    # Create stop-band from (center - width/2) to (center + width/2)
+    low = notch_center - width / 2
+    high = notch_center + width / 2
+    # Design FIR band-stop (notch) filter
+    b = firwin(numtaps, [low, high], pass_zero=True)
+    if zi is None:
+        zi = lfilter_zi(b, [1.0]) * signal[0]
+    filtered, zf = lfilter(b, [1.0], signal, zi=zi)
+    return filtered, zf
+
+from scipy.signal import butter, sosfilt, sosfilt_zi, iirnotch, tf2sos
+
+def sosfilt_bandpass(signal, fs, cutoff, order, zi=None):
+    nyq = 0.5 * fs
+    low, high = cutoff[0] / nyq, cutoff[1] / nyq
+    sos = butter(order, [low, high], btype='band', output='sos')
+    if zi is None:
+        zi = sosfilt_zi(sos) * signal[0]
+    filtered, zf = sosfilt(sos, signal, zi=zi)
+    return filtered, zf
+
+def sosfilt_lowpass(signal, fs, cutoff, order, zi=None):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    sos = butter(order, normal_cutoff, btype='low', output='sos')
+    if zi is None:
+        zi = sosfilt_zi(sos) * signal[0]
+    filtered, zf = sosfilt(sos, signal, zi=zi)
+    return filtered, zf
+
+def sosfilt_notch(signal, fs, notch_freq=50.0, Q=30.0, zi=None):
+    # Design IIR notch filter
+    b, a = iirnotch(w0=notch_freq / (0.5 * fs), Q=Q)
+    sos = tf2sos(b, a)  # Convert to second-order sections
+    if zi is None:
+        zi = sosfilt_zi(sos) * signal[0]
+    filtered, zf = sosfilt(sos, signal, zi=zi)
+    return filtered, zf
+
+def sosfilt_highpass(signal, fs, cutoff, order, zi=None):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    sos = butter(order, normal_cutoff, btype='high', output='sos')
+    if zi is None:
+        zi = sosfilt_zi(sos) * signal[0]
+    filtered, zf = sosfilt(sos, signal, zi=zi)
+    return filtered, zf
 
 def lowpass_filter(data, cutoff=40, fs=100, order=4):
     b, a = butter(order, cutoff, btype='lowpass', fs=fs)

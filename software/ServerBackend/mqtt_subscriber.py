@@ -159,10 +159,10 @@ class MQTTSubscriber():
                 is_measuring = None
 
                 if device_measure_status == "true":
-                    print("[MQTT] Device is now measuring")
+                    # print("[MQTT] Device is now measuring")
                     is_measuring = True
                 elif device_measure_status == "false":
-                    print("[MQTT] Device has stopped measuring")
+                    # print("[MQTT] Device has stopped measuring")
                     is_measuring = False
                 else:
                     print(f"[MQTT] Device measure status unknown: {device_measure_status}")
@@ -211,6 +211,24 @@ class MQTTSubscriber():
 
     def publish_data_link(self, link: str):
         self.client.publish(f"device/{self.subcribed_device_id}/data/file", payload=link, qos=1, retain=False)
+
+    def publish_pain_assessment(self, pain_level: int):
+        """Publish the pain assessment result to the MQTT broker."""
+        self.client.publish(
+            f"device/{self.subcribed_device_id}/pain_level",
+            payload=pain_level,
+            qos=1,
+            retain=False
+        )
+    
+    def publish_pulse_rate(self, pulse_rate: float):
+        """Publish the pulse rate to the MQTT broker."""
+        self.client.publish(
+            f"device/{self.subcribed_device_id}/pulse_rate",
+            payload=pulse_rate,
+            qos=1,
+            retain=False
+        )
 
     def get_output_queue(self) -> dict:
         """Return the data for processing."""

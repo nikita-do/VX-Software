@@ -73,7 +73,7 @@ class PacketProcessor(threading.Thread):
         if not all(isinstance(lst, list) for lst in [ir_list, red_list, ecg_list, gsr_list]):
             print("[PacketProcessor] Invalid data format. One or more signals are not lists.")
             return None
-        
+
         if not isinstance(timestamp, int):
             print(f"[PacketProcessor] Invalid timestamp type: {type(timestamp)}. Expected int.")
             return None
@@ -85,7 +85,6 @@ class PacketProcessor(threading.Thread):
             return None
 
         original_length = lengths[0]
-        expected_length = expected_length
 
         # Pad or truncate signals to match expected_length
         if original_length < expected_length:
@@ -109,7 +108,6 @@ class PacketProcessor(threading.Thread):
             ecg_list = ecg_list[:expected_length]
             gsr_list = gsr_list[:expected_length]
 
-        # At this point all signals are the same length = expected_length
         return {
             "id": packet_id,
             "t": timestamp,

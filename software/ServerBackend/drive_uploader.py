@@ -57,6 +57,16 @@ class DriveUploader(threading.Thread):
             folder = self.service.files().create(body=file_metadata, fields='id').execute()
             self.folder_id = folder.get('id')
 
+    def make_file_public(self, file_id):
+        permission = {
+            'type': 'anyone',
+            'role': 'reader'
+        }
+        self.service.permissions().create(
+            fileId=file_id,
+            body=permission
+        ).execute()
+
     def upload_file(self, filepath):
         filename = os.path.basename(filepath)
         mime_type, _ = mimetypes.guess_type(filepath)
@@ -74,9 +84,12 @@ class DriveUploader(threading.Thread):
             fields='id, webViewLink'
         ).execute()
 
+        # Make file public
+        self.make_file_public(uploaded_file['id'])
+
         self.view_link = uploaded_file.get('webViewLink')
 
         print(f"[DriveUploader] File uploaded successfully!")
-        print(f"[DriveUploader] View Link: {self.view_link}")
+        print(f"[DriveUploader] Public View Link: {self.view_link}")
 
         return self.view_link

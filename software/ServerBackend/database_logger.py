@@ -23,7 +23,7 @@ def generate_influx_points(data_dict, tags=None):
 
     measurement_name = data_dict.get("measurement")
 
-    if measurement_name == "biosignal":
+    if measurement_name == "raw_biosignal" or measurement_name == "processed_biosignal":
         # Find a key that contains array data
         data_keys = [
             k for k in data_dict.keys()
@@ -211,7 +211,7 @@ class DatabaseLogger(threading.Thread):
         query = f"""
         from(bucket: "{self.bucket}")
             |> range(start: {start_time}, stop: {end_time})
-            |> filter(fn: (r) => r["_measurement"] == "biosignal")
+            |> filter(fn: (r) => r["_measurement"] == "processed_biosignal")
             |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
         """
 
