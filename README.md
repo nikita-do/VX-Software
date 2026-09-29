@@ -6,9 +6,7 @@ This repository contains the server backend and presentation materials. The thes
 
 ## Demo
 
-[![Open the Vital-X demo video](assets/vitalx-site.png)](assets/demo.mp4)
-
-[Open or download the demo video](assets/demo.mp4) (`assets/demo.mp4`). GitHub does not reliably play repository-relative MP4 files inline in README pages; use the preview or link to open the video.
+[Open or download the demo video](assets/output.mp4) (`assets/demo.mp4`). GitHub does not reliably play repository-relative MP4 files inline in README pages; use the preview or link to open the video.
 
 ## System Overview
 
