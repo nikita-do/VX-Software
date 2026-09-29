@@ -8,9 +8,17 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+RESOURCE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources")
+
 DRIVE_CONFIG = {
-    "credentials_path": "/home/bme662/vital-X/resources/credentials.json",
-    "token_path": "/home/bme662/vital-X/resources/token.json",
+    "credentials_path": os.getenv(
+        "GOOGLE_CREDENTIALS_PATH",
+        os.path.join(RESOURCE_DIR, "credentials.json"),
+    ),
+    "token_path": os.getenv(
+        "GOOGLE_TOKEN_PATH",
+        os.path.join(RESOURCE_DIR, "token.json"),
+    ),
     "folder_name": "VitalX_data",
     "scopes": ["https://www.googleapis.com/auth/drive.file"]
 }
@@ -39,6 +47,7 @@ class DriveUploader(threading.Thread):
             else:
                 flow = InstalledAppFlow.from_client_secrets_file(self.credentials_path, self.scopes)
                 self.creds = flow.run_local_server(port=0)
+            os.makedirs(os.path.dirname(os.path.abspath(self.token_path)), exist_ok=True)
             with open(self.token_path, 'w') as token:
                 token.write(self.creds.to_json())
         self.service = build('drive', 'v3', credentials=self.creds)

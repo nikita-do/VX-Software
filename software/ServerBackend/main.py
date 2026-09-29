@@ -9,14 +9,14 @@ from drive_uploader import DriveUploader
 MQTT_CONFIG = {
     "broker": os.getenv("MQTT_BROKER", "700be638167b43289186dff783367cc3.s1.eu.hivemq.cloud"),
     "port": int(os.getenv("MQTT_PORT", 8883)),
-    "username": os.getenv("MQTT_USERNAME", "ngocdo"),
-    "password": os.getenv("MQTT_PASSWORD", "Ng19102002"),
+    "username": os.getenv("MQTT_USERNAME"),
+    "password": os.getenv("MQTT_PASSWORD"),
     "certificate": "/home/bme662/vital-X/resources/server.pem"
 }
 
 INFLUX_CONFIG = {
     "url": "http://localhost:8086",
-    "token": os.getenv("INFLUXDB_TOKEN", "7oDR4z60aoUxju3WAQIZtXxr6z186Zsx5QDghm65e_U-JxQja8ReirzvgDnt9Yy-mN6_oeiDWab9S6rSKYQdrA=="),
+    "token": os.getenv("INFLUXDB_TOKEN"),
     "org": "BME662",
     "bucket": "vitalx"
 }
@@ -32,6 +32,17 @@ class MainServer:
         ''' Initializes the main server with MQTT and Database configurations. '''
         self.mqtt_config = mqtt_config
         self.influx_config = influx_config
+
+        required_credentials = {
+            "MQTT_USERNAME": self.mqtt_config["username"],
+            "MQTT_PASSWORD": self.mqtt_config["password"],
+            "INFLUXDB_TOKEN": self.influx_config["token"],
+        }
+        missing_credentials = [name for name, value in required_credentials.items() if not value]
+        if missing_credentials:
+            raise RuntimeError(
+                "Missing required environment variables: " + ", ".join(missing_credentials)
+            )
 
         # Initialize MQTT subscriber
         self.mqtt_client = MQTTSubscriber(
