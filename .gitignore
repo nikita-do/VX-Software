@@ -102,3 +102,5 @@ software/data/screenshot.png
 **/credentials.json
 **/token.json
 *.key
+
+.venv

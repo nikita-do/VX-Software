@@ -6,9 +6,9 @@ This repository contains the server backend and presentation materials. The thes
 
 ## Demo
 
-<video src="assets/demo.mp4" controls width="720" title="Vital-X software demo">
-	<a href="assets/demo.mp4">Watch or download the Vital-X demo video</a>.
-</video>
+[![Open the Vital-X demo video](assets/vitalx-site.png)](assets/demo.mp4)
+
+[Open or download the demo video](assets/demo.mp4) (`assets/demo.mp4`). GitHub does not reliably play repository-relative MP4 files inline in README pages; use the preview or link to open the video.
 
 ## System Overview
 
@@ -19,10 +19,6 @@ The device sends CBOR-encoded data through an MQTT broker. The backend subscribe
 The MQTT topic map below shows the device, server, and client communication described in the thesis.
 
 ![Vital-X MQTT topic map](assets/mqtt-topic.png)
-
-The web-app image is the interface shown in the thesis; it is included as a presentation reference, not as a running frontend in this repository.
-
-![Vital-X web interface shown in the thesis](assets/vitalx-site.png)
 
 ## Backend Pipeline
 
