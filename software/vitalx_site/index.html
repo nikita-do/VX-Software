@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VitalX MQTT - Auto Connect</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        body { font-family: sans-serif; margin: 20px;}
+        #statusIndicator { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-left: 10px; background-color: grey; vertical-align: middle;}
+        #chartContainer {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          margin-top: 15px;
+          width: 100%;
+        }
+
+        canvas {
+          background: #fafafa;
+          border: 1px solid #ddd;
+          padding: 4px;
+          border-radius: 4px;
+          width: 100% !important;
+          height: 260px !important;
+        }
+        h3{ margin-bottom: 4px; margin-top: 8px;}
+
+        #timer { margin-top: 15px; font-size: 20px; font-weight: bold; }
+        #log {
+          margin-top: 20px;
+          padding: 10px;
+          background: #f0f0f0;
+          height: auto;
+          max-height: 4.8em;   /* 3 lines × line-height 1.6 */
+          overflow-y: hidden;  /* hide overflow */
+          line-height: 1.6em;
+          font-family: monospace;
+          white-space: normal;
+        }
+
+    </style>    
+</head>
+
+<body>
+
+  <h2>VitalX MQTT Realtime Monitoring</h2>
+
+  <div>Device: <span id="deviceName">Unknown</span> <span id="statusIndicator"></span></div>
+  <div id="timer">Time: 0:00:00</div>
+
+  <label><input type="checkbox" id="logToggle" checked> Enable Logging</label>
+  <div id="log"></div>
+
+  <!-- 3 Charts -->
+  <div id="chartContainer">
+    <div>
+      <h3>ECG</h3>
+      <canvas id="ecgChart" height="200"></canvas>
+    </div>
+
+    <div>
+      <h3>GSR</h3>
+      <canvas id="gsrChart" height="200"></canvas>
+    </div>
+
+    <div>
+      <h3>PPG</h3>
+      <canvas id="ppgChart" height="200"></canvas>
+    </div>
+  </div>
+        
+<script>
+  //Information broker MQTT suport Websockets
+  const MQTT_BROKER_URL = "wss://700be638167b43289186dff783367cc3.s1.eu.hivemq.cloud:8884/mqtt";
+  const MQTT_USERNAME = "ngocdo";
+  const MQTT_PASSWORD = "Ng19102002";
+
+  let client;
+  let deviceID = "";
+
+  //==========================
+  //TIMER SYSTEM
+  //==========================
+  let timerInterval = null;
+  let totalSeconds = 0;
+
+  function startTimer() {
+    if (timerInterval) return; // Already running
+    timerInterval = setInterval(() => {
+      totalSeconds++;
+      document.getElementById("timer").textContent = "Time: " + formatTime(totalSeconds);
+    }, 1000);
+  }
+
+  function stopTimer() {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+
+  function resetTimer() {
+    totalSeconds = 0;
+    document.getElementById("timer").textContent = "Time: 0:00:00";
+  }
+
+  function formatTime(sec) {
+    let h = String(Math.floor(sec / 3600)).padStart(2, '0');
+    let m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+    let s = String(sec % 60).padStart(2, '0');
+    return `${h}:${m}:${s}`;
+  }
+
+  //==========================
+  //LOGGING
+  //==========================
+  function log(msg) {
+    if (!document.getElementById("logToggle").checked) return;
+    const logDiv = document.getElementById("log");
+    logDiv.innerHTML += msg + "<br>";
+    logDiv.scrollTop = logDiv.scrollHeight;
+    console.log(msg);
+  }
+
+  //==========================
+  //GET DEVICE ID FROM URL  
+  //==========================
+  function getDeviceIdFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("device");
+  }
+
+  //==========================
+  //UPDATE STATUS INDICATOR
+  //==========================
+  function updateStatusIndicator(isOnline) {
+    document.getElementById("statusIndicator").style.backgroundColor = isOnline ? "green" : "red";
+  }
+
+  //==========================
+  //CREATE 3 REALTIME CHARTS
+  //==========================
+  function createChart(canvasId, label) {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  return new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: Array(100).fill(''),
+      datasets: [{
+        label: label,
+        data: Array(100).fill(0),
+        borderColor: 'blue',
+        borderWidth: 1,
+        fill: false,
+        tension: 0
+      }]
+    },
+    options: { 
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: { 
+        y: { beginAtZero: true }
+      }
+    }
+  });
+}
+
+  //==========================
+  //MQTT CONNECTION
+  //==========================
+  function connectMQTT() {
+    client = mqtt.connect(MQTT_BROKER_URL, {
+      username: MQTT_USERNAME,
+      password: MQTT_PASSWORD
+    });
+
+    client.on('connect', () => {
+      log("MQTT connected.");
+
+      //Realtime sensor signals
+      client.subscribe(`device/${deviceID}/ecg`);
+      client.subscribe(`device/${deviceID}/gsr`);
+      client.subscribe(`device/${deviceID}/ppg`);
+
+      //Online/offline
+      client.subscribe(`device/${deviceID}/status_online`);
+
+      // Start/stop receive from app
+      client.subscribe(`device/${deviceID}/commands/start`);
+      client.subscribe(`device/${deviceID}/commands/stop`);
+    });
+
+    client.on('message', (topic, message) => {
+      const data = message.toString();
+      log(`Received [${topic}]: ${data}`);
+
+      if(topic === `device/${deviceID}/status_online`) 
+        updateStatusIndicator(data === "true");
+
+      if (topic === `device/${deviceID}/ecg`) pushData(ecgChart, Number(data));
+      if (topic === `device/${deviceID}/gsr`) pushData(gsrChart, Number(data));
+      if (topic === `device/${deviceID}/ppg`) pushData(ppgChart, Number(data));
+
+      //Start from app
+      if (topic === `device/${deviceID}/commands/start` && data === "true") {
+        resetTimer();
+        startTimer();
+      }
+
+      //Stop from app
+      if (topic === `device/${deviceID}/commands/stop` && data === "false") {
+        stopTimer();
+      }
+    });
+  }
+  //==========================
+  //INIT
+  //==========================
+  window.onload = () => {
+      deviceID = getDeviceIdFromUrl();
+      if(!deviceID) {
+          alert("No device ID provided in URL.");
+          return;
+      }
+      document.getElementById("deviceName").textContent = deviceID;
+      connectMQTT();
+  };
+</script>
+</body>
+</html>

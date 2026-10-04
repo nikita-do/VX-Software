@@ -6,7 +6,7 @@ from collections import defaultdict, deque
 from pain_assessor import PainAssessor
 from packet_processor import PacketProcessor
 from mqtt_subscriber import MQTTSubscriber
-from data_processor_filters import firfilter_lowpass, sosfilt_highpass, gsr_nk_filter
+from data_processor_filters import firfilter_lowpass, firfilter_notch, sosfilt_highpass
 from scipy.signal import find_peaks
 
 class DataProcessor(threading.Thread):
@@ -33,8 +33,7 @@ class DataProcessor(threading.Thread):
         self.ppg_hp_filter_state = None  # State for PPG FIR filter
         self.ppg_lp_filter_state = None 
         self.ecg_hp_filter_state = None
-        self.ecg_lp_filter_state = None
-        self.ecg_n2_filter_state = None
+        self.ecg_notch_filter_state = None
         self.gsr_filter_state = None
 
         self.sampling_rate = None  # Initialize sampling rate
@@ -159,19 +158,30 @@ class DataProcessor(threading.Thread):
         )
 
         filtered_ppg_avg_list, self.ppg_lp_filter_state = firfilter_lowpass(
-            highpass_ppg_avg_list, cutoff=7, fs=sampling_rate, numtaps=201, zi=self.ppg_lp_filter_state
+            highpass_ppg_avg_list, cutoff=10, fs=sampling_rate, numtaps=201, zi=self.ppg_lp_filter_state
         )
 
         highpass_ecg_list, self.ecg_hp_filter_state = sosfilt_highpass(
             self.raw_buffers['ecg'], cutoff=0.5, fs=sampling_rate, order=2, zi=self.ecg_hp_filter_state
         )
 
-        filtered_ecg_list, self.ecg_lp_filter_state = firfilter_lowpass(
-            highpass_ecg_list, cutoff=40, fs=sampling_rate, numtaps=201, zi=self.ecg_lp_filter_state
+        location = (self.subscriber.get_location() or "TW").upper()
+        powerline_frequency = 50 if location == "VN" else 60
+        filtered_ecg_list, self.ecg_notch_filter_state = firfilter_notch(
+            highpass_ecg_list,
+            fs=sampling_rate,
+            notch_freq=powerline_frequency,
+            notch_width=2,
+            numtaps=1025,
+            zi=self.ecg_notch_filter_state,
         )
 
-        filtered_gsr_list = gsr_nk_filter(
-            G_theory_uS, fs=sampling_rate
+        filtered_gsr_list, self.gsr_filter_state = firfilter_lowpass(
+            G_theory_uS,
+            cutoff=3,
+            fs=sampling_rate,
+            numtaps=513,
+            zi=self.gsr_filter_state,
         )
 
         # Calculate pulse rate from filtered PPG signal
